@@ -47,7 +47,7 @@ class Architecture_Optimizer():
             gradient_method=AUTODIFF_REVERSE,
             signs_zero_loss_detunings=None,
             kwargs_optimization={},
-            kwargs_solver={},
+            solver_options={},
             S_target_free_symbols_init_range=None,
             make_initial_test=True,
             phase_constraints_for_squeezing=False,
@@ -82,7 +82,7 @@ class Architecture_Optimizer():
             self.solver_options = {'maxfun': np.inf, 'maxiter': 1000, 'ftol': 0., 'gtol': 0.}
         else:
             self.solver_options = {}
-        self.solver_options.update(kwargs_solver)
+        self.solver_options.update(solver_options)
 
         self.S_target = S_target
 
@@ -460,8 +460,6 @@ class Architecture_Optimizer():
                 bounds_intrinsic_loss=BOUNDS_INTRINSIC_LOSS_DEFAULT,
                 max_violation_success=1.e-5, 
                 calc_conditions_and_gradients=None,
-                threshold_switch_to_inverse_mode=np.inf,
-                threshold_loss_to_switch_to_inverse=1.e-5,
                 method=None,
                 **kwargs_solver
             ):
@@ -480,11 +478,8 @@ class Architecture_Optimizer():
             elif bounds_intrinsic_loss is not None:
                 method = 'L-BFGS-B'
 
-        if bounds_intrinsic_loss is not None and threshold_switch_to_inverse_mode is not np.inf:
-            raise Warning('using bounds together with threshold_switch_to_inverse_mode is not implemented properly')
         bounds = self.setup_bounds(bounds_intrinsic_loss, free_idxs)
 
-        idxs_free_abs_variables = np.where(np.array(self.all_variables_types)[free_idxs] == VAR_ABS)[0]
         parameter_history = []
         scattering_matrix_history = []
         loss_history = []
@@ -513,11 +508,14 @@ class Architecture_Optimizer():
             gauge_matrix = None
             scattering_matrix_target_times_gauge_matrix = scattering_matrix_target_func
 
+        solution_dict = self.dict_extract_relevant_information(xsol.x, conditions)
         info_out = {
             'initial_guess': self.complete_variable_arrays_with_zeros(initial_guess, conditions),
             'free_idxs': free_idxs,
             'solution': solution_complete_array,
-            'solution_dict': create_solutions_dict(self.all_variables_list, solution_complete_array),
+            'solution_dict_complete': create_solutions_dict(self.all_variables_list, solution_complete_array),
+            'solution_dict': solution_dict,
+            'parameters_for_analysis': self.extract_cooperativities_and_human_defined_parameters(solution_dict),
             'final_cost': xsol['fun'],
             'success': success,
             'optimizer_message': xsol['message'],
@@ -544,7 +542,6 @@ class Architecture_Optimizer():
                 bounds_intrinsic_loss=BOUNDS_INTRINSIC_LOSS_DEFAULT,
                 max_violation_success=1.e-5,
                 interrupt_if_successful=True,
-                threshold_switch_to_inverse_mode=np.inf,
                 **kwargs_solver
             ):
         
@@ -563,7 +560,6 @@ class Architecture_Optimizer():
                 bounds_intrinsic_loss=bounds_intrinsic_loss,
                 max_violation_success=max_violation_success,
                 calc_conditions_and_gradients=calc_conditions_and_gradients,
-                threshold_switch_to_inverse_mode=threshold_switch_to_inverse_mode,
                 **kwargs_solver
             )
             successes.append(success)
@@ -613,6 +609,7 @@ class Architecture_Optimizer():
         self.complexity_levels = np.array(self.complexity_levels)
         self.unique_complexity_levels = np.flip(sorted(np.unique(self.complexity_levels)))
         self.list_of_upper_triangular_coupling_matrices = np.array(self.list_of_upper_triangular_coupling_matrices)
+        self.num_possible_graphs = len(self.list_of_upper_triangular_coupling_matrices)
 
 
     def find_valid_combinations(self, complexity_level, combinations_to_test=None, perform_graph_reduction_of_successfull_graphs=True):
@@ -688,8 +685,29 @@ class Architecture_Optimizer():
         print('%i graphs identified'%len(self.list_of_upper_triangular_coupling_matrices))
         print('start depth-first search')
         for c in self.unique_complexity_levels:
-            print('complexity level:', c)
+            print('test all graphs with %i degrees of freedom:'%c)
             self.find_valid_combinations(c)
             self.cleanup_valid_combinations()
         print('optimisation finished, list of irreducible graphs has %i elements'%len(self.valid_combinations))
-        return self.valid_combinations
+        return np.array(self.valid_combinations, dtype='int8')
+    
+    def dict_extract_relevant_information(self, solution_array, conditions=None, triu_matrix=None):
+        if conditions is None:
+            conditions = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
+        free_idxs = self.give_free_variable_idxs(conditions)
+        free_variables = [self.all_variables_list[idx] for idx in free_idxs]
+        return create_solutions_dict(free_variables, solution_array)
+
+    def extract_cooperativities_and_human_defined_parameters(self, solution_dict):
+        cooperativity_dict = {}
+        for idx1 in range(self.num_modes):
+            for idx2 in range(self.num_modes):
+                key = 'gabs%i%i'%(idx1, idx2)
+                if key in solution_dict.keys():
+                    cooperativity_dict['C%i%i'%(idx1, idx2)] = 4 * np.abs(solution_dict[key])**2
+
+        for var in self.parameters_S_target:
+            key = var.name
+            cooperativity_dict[key] = solution_dict[key]
+
+        return cooperativity_dict

@@ -28,8 +28,8 @@ def characterize_architectures(list_of_architectures):
         list_of_active_couplings.append(num_active)
     info_dict = {
         'num_detunings': np.asarray(list_of_detunings),
-        'num_passive_couplings': np.asarray(list_of_passive_couplings),
-        'num_active_couplings': np.asarray(list_of_active_couplings),
+        'num_real_couplings': np.asarray(list_of_passive_couplings),
+        'num_complex_couplings': np.asarray(list_of_active_couplings),
         'num_couplings': np.asarray(list_of_passive_couplings)+np.asarray(list_of_active_couplings)
     }
     return info_dict
