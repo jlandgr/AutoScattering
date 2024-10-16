@@ -44,7 +44,7 @@ def create_solutions_dict(variables, values):
 class Architecture_Optimizer():
     def __init__(
             self,
-            S_target, num_lossy_internal_modes, num_zero_loss_modes=0, mode_types='no_squeezing',
+            S_target, num_auxiliary_modes, num_zero_loss_modes=0, mode_types='no_squeezing',
             gradient_method=AUTODIFF_REVERSE,
             signs_zero_loss_detunings=None,
             kwargs_optimization={},
@@ -90,8 +90,8 @@ class Architecture_Optimizer():
         self.S_target = S_target
 
         self.num_port_modes = S_target.shape[0]
-        self.num_lossy_internal_modes = num_lossy_internal_modes
-        self.num_lossy_modes = self.num_port_modes + num_lossy_internal_modes
+        self.num_lossy_internal_modes = num_auxiliary_modes
+        self.num_lossy_modes = self.num_port_modes + num_auxiliary_modes
         self.num_zero_loss_modes = num_zero_loss_modes
         self.num_modes = self.num_port_modes + self.num_lossy_internal_modes + self.num_zero_loss_modes
         self.mode_loss_info = [LOSSY_MODE]*self.num_lossy_modes + [ZERO_LOSS_MODE]*self.num_zero_loss_modes
@@ -141,7 +141,9 @@ class Architecture_Optimizer():
         if make_initial_test:
             success, _, _ = self.repeated_optimization(conditions=[], **self.kwargs_optimization, **self.solver_options)
             if not success:
-                print('unconditioned system cannot be solved, interrupting')
+                raise(Exception('fully connected graph is invalid, interrupting'))
+            else:
+                print('fully connected graph is a valid graph')
 
     def __setup_all_constraints__(self):
         self.all_possible_constraints = []
@@ -740,10 +742,22 @@ class Architecture_Optimizer():
         cleaned_valid_combinations = []
         num_valid_combinations = all_unique_valid_combinations_array.shape[0]
 
-        for combo_idx, valid_combo in tqdm(enumerate(all_unique_valid_combinations_array)):
+        for combo_idx, valid_combo in enumerate(all_unique_valid_combinations_array):
             idxs_combis_to_compare_against = np.setdiff1d(np.arange(num_valid_combinations),combo_idx)
             #check if any other of the valid architecture is a subgraph of the current architecture 
             if not arch.check_if_subgraph_upper_triangle(valid_combo, all_unique_valid_combinations_array[idxs_combis_to_compare_against]):
                 cleaned_valid_combinations.append(valid_combo)
         
         self.valid_combinations = cleaned_valid_combinations
+
+    def perform_depth_first_search(self):
+        print('prepare list of all possible graphs')
+        self.prepare_all_possible_combinations()
+        print('%i graphs identified'%len(self.list_of_upper_triangular_coupling_matrices))
+        print('start depth-first search')
+        for c in self.unique_complexity_levels:
+            print('complexity level:', c)
+            self.find_valid_combinations(c)
+            self.cleanup_valid_combinations()
+        print('optimisation finished, list of irreducible graphs has %i elements'%len(self.valid_combinations))
+        return self.valid_combinations

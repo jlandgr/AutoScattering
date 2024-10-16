@@ -6,18 +6,18 @@ from collections import Counter
 from tqdm import trange
 import numpy as np
 
-def plot_list_of_architectures(
-        architectures, node_colors, positions=None,
+def plot_list_of_graphs(
+        list_of_graphs, node_colors, positions=None,
         size_per_column=2.5, size_per_row=2.5, architectures_per_row=5, **kwargs
         ):
     
-    num_columns = max(len(architectures)%architectures_per_row, architectures_per_row)
-    num_rows = (len(architectures)-1)//architectures_per_row + 1
+    num_columns = max(len(list_of_graphs)%architectures_per_row, architectures_per_row)
+    num_rows = (len(list_of_graphs)-1)//architectures_per_row + 1
     fig, axes = plt.subplots(num_rows, num_columns, figsize=(size_per_column*num_columns,size_per_row*num_rows))
     for ax in axes.flatten():
         ax.axis('off')
-    for idx, combo in enumerate(architectures):
-        draw_combination(triu_matrix=combo, node_colors=node_colors, positions=positions, ax=axes.flatten()[idx], **kwargs)
+    for idx, combo in enumerate(list_of_graphs):
+        plot_graph(triu_matrix=combo, node_colors=node_colors, positions=positions, ax=axes.flatten()[idx], **kwargs)
 
 class Base_Constraint():
     def __init__(self):
@@ -119,7 +119,7 @@ def return_edge_type(combos, mode_types, idx1, idx2):
     else:
         return EDGETYPESQUEEZING
 
-def draw_combination(combination=None, triu_matrix=None, node_colors=None, mode_types='no_squeezing', color_detuning='black', color_passive='black', color_active='green', color_squeezing='blue', positions=None, ax=None, edge_width=2):
+def plot_graph(combination=None, triu_matrix=None, node_colors=None, mode_types='no_squeezing', color_detuning='black', color_passive='black', color_active='green', color_squeezing='blue', positions=None, ax=None, edge_width=2):
     from multimode_systems.architecture import translate_upper_triangle_coupling_matrix_to_conditions
     if combination is None:
         combination = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
