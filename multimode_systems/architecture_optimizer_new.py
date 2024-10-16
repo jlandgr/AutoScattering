@@ -21,7 +21,6 @@ VAR_ABS = 'abs_variable'
 VAR_PHASE = 'phase_variable'
 VAR_INTRINSIC_LOSS = 'intrinsic_loss_variable'
 VAR_USER_DEFINED = 'user_defined'
-VAR_EPSILON = 'epsilon_variable'
 
 ZERO_LOSS_MODE = 'zero_loss_mode'
 LOSSY_MODE = 'lossy_mode'
@@ -32,10 +31,10 @@ INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [-1., 1.]
 BOUNDS_INTRINSIC_LOSS_DEFAULT = [-np.inf, np.inf]
 
 
-def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix, epsilon):
+def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix):
     num_modes = coupling_matrix.shape[0]
     identity = jnp.eye(num_modes)
-    scattering_matrix = identity + epsilon*jnp.linalg.inv(-1.j*coupling_matrix - epsilon*(identity+kappa_int_matrix)/2.)
+    scattering_matrix = identity + jnp.linalg.inv(-1.j*coupling_matrix - (identity+kappa_int_matrix)/2.)
     return scattering_matrix
 
 def create_solutions_dict(variables, values):
@@ -59,8 +58,6 @@ class Architecture_Optimizer():
         
         self.kwargs_optimization = {
             'num_tests': 10,
-            'threshold_switch_to_inverse_mode': np.inf,
-            'threshold_loss_to_switch_to_inverse': 1.e-5,
             'verbosity': 0,
             'init_abs_range': None,
             'init_intrinsinc_loss_range': None,
@@ -287,15 +284,13 @@ class Architecture_Optimizer():
             self.gphases + \
             self.gauge_phases + \
             self.parameters_S_target + \
-            self.variables_intrinsic_losses + \
-            [sp.Symbol('epsilon', real=True)]
+            self.variables_intrinsic_losses 
         self.all_variables_types = \
             [VAR_ABS]*len(self.Deltas+self.gabs) +\
             [VAR_PHASE]*len(self.gphases) + \
             [VAR_PHASE]*len(self.gauge_phases) + \
             [VAR_USER_DEFINED]*len(self.parameters_S_target) + \
-            [VAR_INTRINSIC_LOSS]*len(self.variables_intrinsic_losses) + \
-            [VAR_EPSILON]
+            [VAR_INTRINSIC_LOSS]*len(self.variables_intrinsic_losses) 
         self.S_target_free_symbols_init_range = S_target_free_symbols_init_range
 
         self.S_target_jax = sp.utilities.lambdify(self.all_variables_list, self.S_target, modules='jax') 
@@ -314,7 +309,7 @@ class Architecture_Optimizer():
         if init_intrinsinc_loss_range is None:
             init_intrinsinc_loss_range = INIT_INTRINSIC_LOSS_RANGE_DEFAULT
 
-        idxs_free = self.give_free_variable_idxs(conditions, rescale_variable=None)
+        idxs_free = self.give_free_variable_idxs(conditions)
         
         random_guess = []
         for var_idx, var_type in enumerate(self.all_variables_types):
@@ -339,7 +334,7 @@ class Architecture_Optimizer():
         else:
             bounds = []
             for var_type in self.all_variables_types:
-                if var_type==VAR_ABS or var_type == VAR_PHASE or var_type == VAR_USER_DEFINED or var_type == VAR_EPSILON:
+                if var_type==VAR_ABS or var_type == VAR_PHASE or var_type == VAR_USER_DEFINED:
                     bounds.append([-np.inf, np.inf])
                 elif var_type == VAR_INTRINSIC_LOSS:
                     bounds.append(bounds_intrinsic_loss)
@@ -380,7 +375,7 @@ class Architecture_Optimizer():
             scattering_matrix_target = calc_target_scattering_matrix(input_array)
             coupling_matrix = self.coupling_matrix_effective(input_array)
             kappa_int_matrix = self.kappa_int_matrix_jax(*input_array)
-            scattering_matrix = calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix, input_array[-1])
+            scattering_matrix = calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix)
 
             shape_target = self.S_target.shape
             difference = (scattering_matrix[:shape_target[0],:shape_target[1]] - scattering_matrix_target).flatten()
@@ -395,7 +390,7 @@ class Architecture_Optimizer():
 
         return calc_conditions
 
-    def give_free_variable_idxs(self, conditions, rescale_variable=None):
+    def give_free_variable_idxs(self, conditions):
         free_variable_idxs = [idx for idx in range(len(self.all_variables_list))]
         for c in conditions:
             if type(c) == msc.Constraint_coupling_zero:
@@ -417,30 +412,16 @@ class Architecture_Optimizer():
             else:
                 raise Exception('only architectural constraints are allowed')
             
-        if rescale_variable is None:
-            free_variable_idxs.remove(len(self.all_variables_list)-1)  #remove epsilon from free variables
-        else:
-            if not [self.all_variables_list[idx] for idx in free_variable_idxs].__contains__(rescale_variable):
-                raise Exception('variable with which you want to rescale is not part of the free variables')
-            idx_rescaled = self.all_variables_list.index(rescale_variable)
-            free_variable_idxs.remove(idx_rescaled)  #remove rescaled variable index
-            
         return free_variable_idxs
 
-    def give_conditions_func_with_conditions(self, conditions, rescale_variable=None):
-        idxs_free_variables = self.give_free_variable_idxs(conditions, rescale_variable=rescale_variable)
+    def give_conditions_func_with_conditions(self, conditions):
+        idxs_free_variables = self.give_free_variable_idxs(conditions)
         np_idxs_free_variables = np.array(idxs_free_variables)
-        if rescale_variable is not None:
-            idx_rescaled = self.all_variables_list.index(rescale_variable)
 
         num_total_variables = len(self.all_variables_list)
         def calc_conditions_constrained(partial_input_array):
             full_input_array = np.zeros(num_total_variables)
             full_input_array[idxs_free_variables] = partial_input_array
-            if rescale_variable is None:
-                full_input_array[-1] = 1. #epsilon=1.
-            else:
-                full_input_array[idx_rescaled] = 1.
                 
             return self.conditions_func(full_input_array)
         
@@ -451,10 +432,6 @@ class Architecture_Optimizer():
             def calc_jacobian_constrained(partial_input_array):
                 full_input_array = np.zeros(num_total_variables)
                 full_input_array[idxs_free_variables] = partial_input_array
-                if rescale_variable is None:
-                    full_input_array[-1] = 1. #epsilon=1.
-                else:
-                    full_input_array[idx_rescaled] = 1.
                 # return self.jacobian(full_input_array)[jnp.array(idxs_free_variables)]
                 jacobian, aux_dict = self.jacobian(full_input_array)
                 return np.array(jacobian)[np_idxs_free_variables]
@@ -463,10 +440,6 @@ class Architecture_Optimizer():
                 raise NotImplementedError()
                 # full_input_array = np.zeros(num_total_variables)
                 # full_input_array[idxs_free_variables] = partial_input_array
-                # if rescale_variable is None:
-                #     full_input_array[-1] = 1. #epsilon=1.
-                # else:
-                #     full_input_array[idx_rescaled] = 1.
                 # return np.take(np.take(np.array(self.hessian(full_input_array)), np_idxs_free_variables, axis=0), np_idxs_free_variables, axis=1)
             
             calc_jacobian = calc_jacobian_constrained
@@ -474,32 +447,11 @@ class Architecture_Optimizer():
   
         return calc_conditions_constrained, calc_jacobian, calc_hessian
 
-    def complete_variable_arrays_with_zeros(self, variable_array, conditions, rescale_variable=None):
-        free_variable_idxs = self.give_free_variable_idxs(conditions, rescale_variable=rescale_variable)
+    def complete_variable_arrays_with_zeros(self, variable_array, conditions):
+        free_variable_idxs = self.give_free_variable_idxs(conditions)
         complete_variable_array = np.zeros(len(self.all_variables_list))
         complete_variable_array[free_variable_idxs] = variable_array
-        if rescale_variable is None:
-            complete_variable_array[-1] = 1. #epsilon
-        else:
-            idx_rescaled = self.all_variables_list.index(rescale_variable)
-            complete_variable_array[idx_rescaled] = 1.
-
         return complete_variable_array
-    
-    def perform_rescaling(self, unscaled_input, rescale_variable, conditions):
-        unscaled_input = self.complete_variable_arrays_with_zeros(unscaled_input, conditions=conditions, rescale_variable=None)
-        rescaled_input = np.zeros_like(unscaled_input)
-        idx_rescaled = self.all_variables_list.index(rescale_variable)
-        rescale_value = unscaled_input[idx_rescaled]
-        for var_idx, var_type in enumerate(self.all_variables_types):
-            if var_type == VAR_ABS:
-                rescaled_input[var_idx] = unscaled_input[var_idx]/rescale_value
-            else:
-                rescaled_input[var_idx] = unscaled_input[var_idx]
-        rescaled_input[-1] = 1/rescale_value #epsilon
-        # new free indices after rescaling 
-        free_variable_idxs = self.give_free_variable_idxs(conditions, rescale_variable=rescale_variable)
-        return rescaled_input[free_variable_idxs]
 
     def optimize_given_conditions(self,
                 conditions=None, triu_matrix=None, verbosity=False,
@@ -536,38 +488,20 @@ class Architecture_Optimizer():
         parameter_history = []
         scattering_matrix_history = []
         loss_history = []
-        rescale_variable = None
+
         def callback(Xi, *args):
-            nonlocal rescale_variable
-            if rescale_variable is None:
-                loss, aux_dict = calc_conditions(Xi)
-            else:
-                loss, aux_dict = calc_conditions_rescaled(Xi)
+            
+            loss, aux_dict = calc_conditions(Xi)
             parameter_history.append(Xi)
             scattering_matrix_history.append(aux_dict['scattering_matrix'])
             loss_history.append(loss)
             if loss < max_violation_success:
                 raise StopIteration('loss below threshold for success')
-            if rescale_variable is None:
-                if np.any(np.abs(Xi[idxs_free_abs_variables])>threshold_switch_to_inverse_mode) and loss < threshold_loss_to_switch_to_inverse:
-                    idx_rescale = np.argmax(np.abs(Xi[idxs_free_abs_variables]))
-                    rescale_variable = self.all_variables_list[free_idxs[idxs_free_abs_variables[idx_rescale]]]
-                    raise StopIteration('a coupling amplitude exceeds the threshold to switch to the inverse mode')
 
         xsol = sciopt.minimize(lambda x: calc_conditions(x)[0], initial_guess, jac=calc_gradients, bounds=bounds, callback=callback, method=method, options=kwargs_solver)
 
-        # print('hi')
-        if rescale_variable is not None:
-            iteration_where_rescaled_occured = xsol['nit']
-            calc_conditions_rescaled, calc_gradients_recaled, _ = self.give_conditions_func_with_conditions(conditions, rescale_variable=rescale_variable)
-            initial_guess_rescaled = self.perform_rescaling(xsol.x, rescale_variable=rescale_variable, conditions=conditions)
-            xsol = sciopt.minimize(lambda x: calc_conditions_rescaled(x)[0], initial_guess_rescaled, jac=calc_gradients_recaled, callback=callback, options=kwargs_solver)
-        else:
-            iteration_where_rescaled_occured = None
-        # xsol = sciopt.least_squares(calc_conditions, initial_guess, jac=calc_gradients, **kwargs_solver)
-
         success = np.all(np.abs(xsol['fun']) < self.kwargs_optimization['max_violation_success'])
-        solution_complete_array = self.complete_variable_arrays_with_zeros(xsol.x, conditions, rescale_variable=rescale_variable)
+        solution_complete_array = self.complete_variable_arrays_with_zeros(xsol.x, conditions)
         solution_effective_coupling_matrix = self.coupling_matrix_effective(solution_complete_array)
         kappa_int_matrix = self.kappa_int_matrix_jax(*solution_complete_array)
 
@@ -590,7 +524,7 @@ class Architecture_Optimizer():
             'effective_coupling_matrix': solution_effective_coupling_matrix,
             'coupling_matrix': self.coupling_matrix_jax(*solution_complete_array),
             'kappa_int_matrix': self.kappa_int_matrix_jax(*solution_complete_array),
-            'scattering_matrix': calc_scattering_matrix_from_coupling_matrix(solution_effective_coupling_matrix, kappa_int_matrix, solution_complete_array[-1]),
+            'scattering_matrix': calc_scattering_matrix_from_coupling_matrix(solution_effective_coupling_matrix, kappa_int_matrix),
             'scattering_matrix_target_func': scattering_matrix_target_func,
             'scattering_matrix_target_times_gauge_matrix': scattering_matrix_target_times_gauge_matrix,
             'gauge_matrix': gauge_matrix,
@@ -598,9 +532,7 @@ class Architecture_Optimizer():
             'parameter_history': parameter_history,
             'loss_history': loss_history,
             'scattering_matrix_history': scattering_matrix_history,
-            'bounds': None,
-            'rescale_variable': rescale_variable,
-            'iteration_where_rescaled_occured': iteration_where_rescaled_occured
+            'bounds': bounds,
         }
 
         return success, info_out
