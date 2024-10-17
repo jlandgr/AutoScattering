@@ -188,11 +188,11 @@ class Architecture_Optimizer():
         return sp.Symbol('Delta%i'%idx, real=True)
 
     def __initialize_coupling_matrix__(self):
-        # initializes M-identity*omega matrix (see Sharelatex)
+        # initializes the coupling matrix
 
         self.Deltas = []
-        self.gabs = [] #{'gabs%i%i'%(idx1, idx2): sp.Symbol('gabs%i%i'%(idx1,idx2), real=True) for idx2 in range(self.num_modes) for idx1 in range(idx2)}
-        self.gphases = [] #{'gphase%i%i'%(idx1, idx2): sp.Symbol('gphase%i%i'%(idx1,idx2), real=True) for idx2 in range(self.num_modes) for idx1 in range(idx2)}
+        self.gabs = [] 
+        self.gphases = [] 
 
         if self.signs_zero_loss_detunings is None:
             self.signs_zero_loss_detunings = np.ones(self.num_zero_loss_modes, dtype='int')
@@ -704,7 +704,7 @@ class Architecture_Optimizer():
             for idx2 in range(self.num_modes):
                 key = 'gabs%i%i'%(idx1, idx2)
                 if key in solution_dict.keys():
-                    cooperativity_dict['C%i%i'%(idx1, idx2)] = 4 * np.abs(solution_dict[key])**2
+                    cooperativity_dict['C%i,%i'%(idx1, idx2)] = 4 * np.abs(solution_dict[key])**2
 
         for var in self.parameters_S_target:
             key = var.name
