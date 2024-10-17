@@ -113,7 +113,7 @@ class Architecture_Optimizer():
                     self.enforced_constraints.append(constraint)
         self.__setup_all_constraints__()
 
-        self.__initialize_coupling_matrix__()
+        self.coupling_matrix = self.__initialize_coupling_matrix__()
         self.__initialize_parameters__(S_target_free_symbols_init_range)
         self.conditions_func = jax.jit(self.__initialize_conditions_func__())
         
@@ -176,69 +176,174 @@ class Architecture_Optimizer():
             else:
                 self.operators.append(sym.Mode().adag)
 
-    def __init_gabs__(self, idx1, idx2):
-        idx1, idx2 = sorted([idx1, idx2])
-        return sp.Symbol('gabs%i%i'%(idx1,idx2), real=True)
+    def __init_gabs__(self, idx1, idx2, beamsplitter=True, append=False):
+        if beamsplitter:
+            varname = '|g_{'
+        else:
+            varname = '|\\nu_{'
+        varname += str(idx1) + ','
+        varname += str(idx2)
+        varname += '}|'
+        new_variable = sp.Symbol(varname, real=True)
+
+        if append and not new_variable in self.gabs:
+            self.gabs.append(new_variable)
+
+        return new_variable
     
-    def __init_gphase__(self, idx1, idx2):
-        idx1, idx2 = sorted([idx1, idx2])
-        return sp.Symbol('gphase%i%i'%(idx1,idx2), real=True)
+    def __init_gphase__(self, idx1, idx2, beamsplitter=True, append=False):
+        if beamsplitter:
+            varname = '\mathrm{arg}(g_{'
+        else:
+            varname = '\mathrm{arg}(\\nu_{'
+        varname += str(idx1) + ','
+        varname += str(idx2)
+        varname += '})'
+        new_variable = sp.Symbol(varname, real=True)
+
+        if append and not new_variable in self.gphases:
+            self.gphases.append(new_variable)
+
+        return new_variable
     
-    def __init_Delta__(self, idx):
-        return sp.Symbol('Delta%i'%idx, real=True)
+    def __init_Delta__(self, idx, append=False):        
+        new_variable = sp.Symbol('Delta%i'%idx, real=True)
+        if append and not new_variable in self.Deltas:
+            self.Deltas.append(new_variable)
+
+        return new_variable
+    
+    def __give_coupling_element__(self, idx1, idx2, operators, with_phase=True, append=False):
+        op1 = operators[idx1]
+        op2 = operators[idx2]
+
+        idxmin, idxmax = min(idx1, idx2), max(idx1, idx2)
+
+        # detuning
+        if idx1 == idx2:
+            detuning = self.__init_Delta__(idxmin, append=append)
+            if isinstance(op1, sym.Annihilation_operator):
+                return - detuning
+            else:
+                return detuning
+
+        # beamsplitter
+        elif type(op1) == type(op2):
+            gabs = self.__init_gabs__(idxmin, idxmax, beamsplitter=True, append=append)
+            if with_phase:
+                gphase = self.__init_gphase__(idxmin, idxmax, beamsplitter=True, append=append)
+            else:
+                gphase = sp.S(0)
+            coupling = gabs * sp.exp(sp.I*gphase)
+            if idx1 < idx2:
+                pass
+            else:
+                coupling = sp.conjugate(coupling) #beamsplitter coupling matrix is Hermitian
+
+            if isinstance(op1, sym.Annihilation_operator):
+                return coupling
+            else:
+                return - sp.conjugate(coupling)
+            
+        # squeezing
+        else:
+            gabs = self.__init_gabs__(idxmin, idxmax, beamsplitter=False, append=append)
+            if with_phase:
+                gphase = self.__init_gphase__(idxmin, idxmax, beamsplitter=False, append=append)
+            else:
+                gphase = sp.S(0)
+            coupling = gabs * sp.exp(sp.I*gphase)
+            if isinstance(op1, sym.Annihilation_operator):
+                return coupling
+            else:
+                return -sp.conjugate(coupling)
 
     def __initialize_coupling_matrix__(self):
-        # initializes the coupling matrix
-
+        append = True
+        self.gabs = []
+        self.gphases = []
         self.Deltas = []
-        self.gabs = [] 
-        self.gphases = [] 
-
-        if self.signs_zero_loss_detunings is None:
-            self.signs_zero_loss_detunings = np.ones(self.num_zero_loss_modes, dtype='int')
-        else:
-            self.signs_zero_loss_detunings = np.array(self.signs_zero_loss_detunings)
-        # coupling_matrix_not_lossy = sp.diag(*self.signs_zero_loss_detunings.tolist())
-
-        coupling_matrix = sp.zeros(self.num_modes)
-        for idx in range(self.num_modes):
-            if self.mode_loss_info[idx] == LOSSY_MODE:
-                if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
-                    Delta = self.__init_Delta__(idx)
-                    self.Deltas.append(Delta)
-                    coupling_matrix[idx,idx] = Delta
-                else:
-                    coupling_matrix[idx,idx] = 0
-            else:
-                coupling_matrix[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
-            
-        for idx2 in range(self.num_modes):
-            for idx1 in range(idx2):
-                if type(self.operators[idx1]) is type(self.operators[idx2]):
-                    sign = sp.S(1)
-                else:
-                    sign = -sp.S(1)
-                
-                gabs = self.__init_gabs__(idx1, idx2)
-                gphase = self.__init_gphase__(idx1, idx2)
-
-                if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE:
-                    if msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
-                        coupling_matrix_idx1_idx2 = 0
-                    elif msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
-                        coupling_matrix_idx1_idx2 = gabs
-                        self.gabs.append(gabs)
-                    else:
-                        coupling_matrix_idx1_idx2 = gabs * sp.exp(sp.I * gphase)
-                        self.gabs.append(gabs)
-                        self.gphases.append(gphase)
-                    
-                    coupling_matrix[idx1,idx2] = coupling_matrix_idx1_idx2
-                    coupling_matrix[idx2,idx1] = sign*sp.conjugate(coupling_matrix_idx1_idx2)
-                else:
-                    pass
+        coupling_matrix_dimensionless = sp.zeros(self.num_modes)
         
-        self.coupling_matrix = coupling_matrix
+        for idx in range(self.num_modes):            
+            if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
+                coupling_matrix_dimensionless[idx, idx] = self.__give_coupling_element__(idx, idx, operators=self.operators, append=append)
+        
+        for idx1 in range(self.num_modes):
+            for idx2 in range(self.num_modes):
+                if idx1 != idx2:
+                    if not msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
+                        if not msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
+                            with_phase = True
+                        else:
+                            with_phase = False
+                        coupling_matrix_dimensionless[idx1, idx2] = self.__give_coupling_element__(idx1, idx2, with_phase=with_phase, operators=self.operators, append=append)
+
+        return coupling_matrix_dimensionless
+
+    # def __init_gabs__(self, idx1, idx2):
+    #     idx1, idx2 = sorted([idx1, idx2])
+    #     return sp.Symbol('gabs%i%i'%(idx1,idx2), real=True)
+    
+    # def __init_gphase__(self, idx1, idx2):
+    #     idx1, idx2 = sorted([idx1, idx2])
+    #     return sp.Symbol('gphase%i%i'%(idx1,idx2), real=True)
+    
+    # def __init_Delta__(self, idx):
+    #     return sp.Symbol('Delta%i'%idx, real=True)
+
+    # def __initialize_coupling_matrix__(self):
+    #     # initializes the coupling matrix
+
+    #     self.Deltas = []
+    #     self.gabs = [] 
+    #     self.gphases = [] 
+
+    #     if self.signs_zero_loss_detunings is None:
+    #         self.signs_zero_loss_detunings = np.ones(self.num_zero_loss_modes, dtype='int')
+    #     else:
+    #         self.signs_zero_loss_detunings = np.array(self.signs_zero_loss_detunings)
+    #     # coupling_matrix_not_lossy = sp.diag(*self.signs_zero_loss_detunings.tolist())
+
+    #     coupling_matrix = sp.zeros(self.num_modes)
+    #     for idx in range(self.num_modes):
+    #         if self.mode_loss_info[idx] == LOSSY_MODE:
+    #             if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
+    #                 Delta = self.__init_Delta__(idx)
+    #                 self.Deltas.append(Delta)
+    #                 coupling_matrix[idx,idx] = Delta
+    #             else:
+    #                 coupling_matrix[idx,idx] = 0
+    #         else:
+    #             coupling_matrix[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
+            
+    #     for idx2 in range(self.num_modes):
+    #         for idx1 in range(idx2):
+    #             if type(self.operators[idx1]) is type(self.operators[idx2]):
+    #                 sign = sp.S(1)
+    #             else:
+    #                 sign = -sp.S(1)
+                
+    #             gabs = self.__init_gabs__(idx1, idx2)
+    #             gphase = self.__init_gphase__(idx1, idx2)
+
+    #             if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE:
+    #                 if msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
+    #                     coupling_matrix_idx1_idx2 = 0
+    #                 elif msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
+    #                     coupling_matrix_idx1_idx2 = gabs
+    #                     self.gabs.append(gabs)
+    #                 else:
+    #                     coupling_matrix_idx1_idx2 = gabs * sp.exp(sp.I * gphase)
+    #                     self.gabs.append(gabs)
+    #                     self.gphases.append(gphase)
+                    
+    #                 coupling_matrix[idx1,idx2] = coupling_matrix_idx1_idx2
+    #                 coupling_matrix[idx2,idx1] = sign*sp.conjugate(coupling_matrix_idx1_idx2)
+    #             else:
+    #                 pass
+        
+    #     self.coupling_matrix = coupling_matrix
 
     def __initialize_parameters__(self, S_target_free_symbols_init_range):
 
@@ -390,6 +495,13 @@ class Architecture_Optimizer():
 
         return calc_conditions
 
+    def calc_scattering_matrix_from_parameter_dictionary(self, parameter_dictionary):
+        input_array = np.array([parameter_dictionary[var.name] for var in self.all_variables_list])
+        coupling_matrix = self.coupling_matrix_jax(*input_array)
+        kappa_int_matrix = self.kappa_int_matrix_jax(*input_array)
+        scattering_matrix = calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix)
+        return scattering_matrix
+
     def give_free_variable_idxs(self, conditions):
         free_variable_idxs = [idx for idx in range(len(self.all_variables_list))]
         for c in conditions:
@@ -515,7 +627,7 @@ class Architecture_Optimizer():
             'solution': solution_complete_array,
             'solution_dict_complete': create_solutions_dict(self.all_variables_list, solution_complete_array),
             'solution_dict': solution_dict,
-            'parameters_for_analysis': self.extract_cooperativities_and_human_defined_parameters(solution_dict),
+            'parameters_for_analysis': self.extract_cooperativities_and_human_defined_parameters(conditions, solution_dict),
             'final_cost': xsol['fun'],
             'success': success,
             'optimizer_message': xsol['message'],
@@ -698,13 +810,22 @@ class Architecture_Optimizer():
         free_variables = [self.all_variables_list[idx] for idx in free_idxs]
         return create_solutions_dict(free_variables, solution_array)
 
-    def extract_cooperativities_and_human_defined_parameters(self, solution_dict):
+    def extract_cooperativities_and_human_defined_parameters(self, conditions, solution_dict):
         cooperativity_dict = {}
+        
+        free_idxs = self.give_free_variable_idxs(conditions)
+        free_variables = [self.all_variables_list[idx] for idx in free_idxs]
+
         for idx1 in range(self.num_modes):
             for idx2 in range(self.num_modes):
-                key = 'gabs%i%i'%(idx1, idx2)
-                if key in solution_dict.keys():
-                    cooperativity_dict['C%i,%i'%(idx1, idx2)] = 4 * np.abs(solution_dict[key])**2
+                key = self.__init_gabs__(idx1, idx2, beamsplitter=True)
+                if key in free_variables:
+                    cooperativity = 4 * np.abs(solution_dict[key.name])**2
+                    cooperativity_dict['C_{%i,%i}'%(idx1, idx2)] = cooperativity
+                key = self.__init_gabs__(idx1, idx2, beamsplitter=False)
+                if key in free_variables:
+                    cooperativity = 4 * np.abs(solution_dict[key.name])**2
+                    cooperativity_dict['C_{%i,%i}'%(idx1, idx2)] = cooperativity
 
         for var in self.parameters_S_target:
             key = var.name
