@@ -507,8 +507,9 @@ class Architecture_Optimizer():
         for c in conditions:
             if type(c) == msc.Constraint_coupling_zero:
                 if c.idxs[0] != c.idxs[1]:
-                    gabs = self.__init_gabs__(c.idxs[0], c.idxs[1])
-                    gphase = self.__init_gphase__(c.idxs[0], c.idxs[1])
+                    beamsplitter = self.mode_types[c.idxs[0]] == self.mode_types[c.idxs[1]]
+                    gabs = self.__init_gabs__(c.idxs[0], c.idxs[1], beamsplitter=beamsplitter)
+                    gphase = self.__init_gphase__(c.idxs[0], c.idxs[1], beamsplitter=beamsplitter)
                     if gabs in self.all_variables_list:
                         free_variable_idxs.remove(self.all_variables_list.index(gabs))
                     if gphase in self.all_variables_list:
