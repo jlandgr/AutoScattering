@@ -128,12 +128,12 @@ def plot_graph(combination=None, triu_matrix=None, node_colors=None, mode_types=
     if mode_types == 'no_squeezing':
         mode_types = np.ones(num_modes, dtype='bool')
 
-    node_labels = {}
-    for idx in range(num_modes):
-        if mode_types[idx]:
-            node_labels[idx] = ''
-        else:
-            node_labels[idx] = '$\dag$'
+    # node_labels = {}
+    # for idx in range(num_modes):
+    #     if mode_types[idx]:
+    #         node_labels[idx] = ''
+    #     else:
+    #         node_labels[idx] = '$\dag$'
 
 
     G = nx.Graph()
@@ -155,7 +155,7 @@ def plot_graph(combination=None, triu_matrix=None, node_colors=None, mode_types=
         G,
         positions,
         node_color=nx.get_node_attributes(G, 'color').values(),
-        labels=node_labels, #nx.get_node_attributes(G, 'label'),
+        # labels=node_labels, #nx.get_node_attributes(G, 'label'),
         edge_color=nx.get_edge_attributes(G, 'color').values(),
         width=[edge_width for u,v in G.edges],
         ax=ax

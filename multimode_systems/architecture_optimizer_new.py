@@ -26,9 +26,9 @@ ZERO_LOSS_MODE = 'zero_loss_mode'
 LOSSY_MODE = 'lossy_mode'
 
 INIT_ABS_RANGE_DEFAULT = [-1., 1.]
-INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [-1., 1.]
+INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [1.e-8, 2.]
 # BOUNDS_ABS_DEFAULT = [-np.inf, np.inf]
-BOUNDS_INTRINSIC_LOSS_DEFAULT = [-np.inf, np.inf]
+BOUNDS_INTRINSIC_LOSS_DEFAULT = [1.e-8, np.inf]
 
 
 def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix):
@@ -59,17 +59,17 @@ class Architecture_Optimizer():
         self.kwargs_optimization = {
             'num_tests': 10,
             'verbosity': 0,
-            'init_abs_range': None,
-            'init_intrinsinc_loss_range': None,
-            'bounds_intrinsic_loss': None,
+            'init_abs_range': INIT_ABS_RANGE_DEFAULT,
+            'init_intrinsinc_loss_range': INIT_INTRINSIC_LOSS_RANGE_DEFAULT,
+            'bounds_intrinsic_loss': BOUNDS_INTRINSIC_LOSS_DEFAULT,
             'max_violation_success': 1.e-10,
-            'init_intrinsinc_loss_range': None
         }
+
         self.kwargs_optimization.update(kwargs_optimization)
         self.kwargs_optimization['interrupt_if_successful'] = True
 
         if method is None:
-            if self.kwargs_optimization['bounds_intrinsic_loss'] is None:
+            if self.kwargs_optimization['bounds_intrinsic_loss'] is None or port_intrinsic_losses is False:
                 method='BFGS'
             else:
                 method='L-BFGS-B'
@@ -97,11 +97,11 @@ class Architecture_Optimizer():
         self.free_gauge_phases = free_gauge_phases
 
         if port_intrinsic_losses is True:
-            self.port_intrinsic_losses = [True for _ in range(self.num_port_modes)]
+            self.port_intrinsic_losses = np.array([True for _ in range(self.num_port_modes)])
         elif port_intrinsic_losses is False:
-            self.port_intrinsic_losses = [False for _ in range(self.num_port_modes)]
+            self.port_intrinsic_losses = np.array([False for _ in range(self.num_port_modes)])
         else:
-            self.port_intrinsic_losses = port_intrinsic_losses
+            self.port_intrinsic_losses = np.array(port_intrinsic_losses)
 
         self.__prepare_mode_types__(mode_types)
         self.phase_constraints_for_squeezing = phase_constraints_for_squeezing
@@ -375,7 +375,7 @@ class Architecture_Optimizer():
         kappa_int_matrix_diag = []
         for mode_idx in range(self.num_port_modes):
             if self.port_intrinsic_losses[mode_idx]:
-                kappa_int = sp.Symbol('kappa_int%i'%mode_idx, real=True)
+                kappa_int = sp.Symbol('\gamma_%i'%mode_idx, real=True)
                 self.variables_intrinsic_losses.append(kappa_int)
                 kappa_int_matrix_diag.append(kappa_int)
             else:
@@ -434,7 +434,7 @@ class Architecture_Optimizer():
         return np.array(random_guess)[idxs_free], idxs_free
 
     def setup_bounds(self, bounds_intrinsic_loss=None, free_idxs=None):
-        if bounds_intrinsic_loss is None:
+        if bounds_intrinsic_loss is None or np.all(self.port_intrinsic_losses==False):
             return None
         else:
             bounds = []
@@ -827,6 +827,11 @@ class Architecture_Optimizer():
                 if key in free_variables:
                     cooperativity = 4 * np.abs(solution_dict[key.name])**2
                     cooperativity_dict['C_{%i,%i}'%(idx1, idx2)] = cooperativity
+
+        for idx in range(self.num_port_modes):
+            if self.port_intrinsic_losses[idx]:
+                key = '\gamma_%i'%idx
+                cooperativity_dict[key] = solution_dict[key]
 
         for var in self.parameters_S_target:
             key = var.name
