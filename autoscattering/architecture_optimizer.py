@@ -1,613 +1,732 @@
 import jax
-import jax.numpy as jnp
 import numpy as np
+import jax.numpy as jnp
 import sympy as sp
-import pickle
-
+import scipy.optimize as sciopt
 from tqdm import trange, tqdm
-from itertools import permutations, product, combinations
+from itertools import product
 
-import multimode_systems.symbolic as sym
 import multimode_systems.constraints as msc
+import multimode_systems.symbolic as sym
 import multimode_systems.architecture as arch
 
-import time
-
-SUCCESS_DYNAMICAL_AND_SCATTERING = 2
-SUCCESS_SCATTERING = 1
-SUCCESS_FAILED = 0
-
-def setup_Bogoliubov_conditions(operators, calc_S, constraints=[], port_intrinsic_losses=None):
-    num_dimensions = len(operators)
-
-    use_port_instrinsic_losses = False
-    if port_intrinsic_losses is not None:
-        if np.sum(port_intrinsic_losses) > 0:
-            use_port_instrinsic_losses = True
-            num_port_intrinsic_losses = np.sum(port_intrinsic_losses)
-            mask_port_instrinsic_losses = jnp.array(np.where(port_intrinsic_losses)[0])
-    
-    sigmaz_diag = []
-    for idx, operator in enumerate(operators):
-        if isinstance(operator, sym.Annihilation_operator):
-            sigmaz_diag.append(1)
-        elif isinstance(operator, sym.Creation_operator):
-            sigmaz_diag.append(-1)
-        else:
-            raise Exception('operator %i has the wrong data type'%idx)
-
-    sigmaz = jnp.diag(jnp.array(sigmaz_diag))
-    identity = jnp.eye(num_dimensions)
-    
-    def calc_conditions(x): 
-        S = calc_S(*x)
-        Sdag = jnp.conjugate(S.T)
-
-        lhs = S@sigmaz@Sdag
-
-        if use_port_instrinsic_losses:
-            intrinsic_losses_array = jnp.zeros(num_dimensions)
-            intrinsic_losses_array = jnp.diag(intrinsic_losses_array.at[mask_port_instrinsic_losses].set(x[-num_port_intrinsic_losses:]))
-            rhs = sigmaz - (S-identity)@sigmaz@intrinsic_losses_array@(Sdag-identity)
-        else:
-            rhs = sigmaz
-
-        indices_upper_triangle = jnp.triu_indices(num_dimensions)
-
-        difference = lhs[indices_upper_triangle] - rhs[indices_upper_triangle]
-
-        inverse_matrix = jnp.linalg.inv(S-jnp.eye(num_dimensions))
-        # determinant = jnp.linalg.det(S-jnp.eye(num_dimensions))
-
-        if len(constraints) > 0:
-            # evaluated_constraints = jnp.hstack((c(S, determinant) for c in constraints))
-            evaluated_constraints = jnp.hstack((c(S, inverse_matrix) for c in constraints))
-            conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference), evaluated_constraints))
-        else:
-            conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference)))
-        
-        return conditions
-
-    return calc_conditions
-
-def check_validity_of_dynamical_matrix(operators, scattering_matrix, kappa_int_rescaled=None):
-    scattering_matrix = np.asarray(scattering_matrix)
-# setup_conditions_subset(operators, S, conditions_using_adjugate=True, kappa_rescaling=True, symbolic=True):
-    num_dimensions = len(operators)
-    num_modes = len(set([op.mode for op in operators]))
-    if num_modes != num_dimensions:
-        raise Exception('operators are not allowed to correspond to the same modes')
-    
-    if kappa_int_rescaled is None:
-        kappa_int_rescaled = np.zeros(num_modes)
-
-    identity = np.eye(num_dimensions)
-
-    #inverse of this matrix gives the dynamical matrix, inverse=adjugate/det
-    inv_dynamical_matrix = scattering_matrix - identity
-    dynamical_matrix = np.linalg.inv(inv_dynamical_matrix)
-    
-    conditions_diag = []
-    conditions_off_diag = []
-
-    for idx in range(num_dimensions):
-        conditions_diag.append(sp.re(dynamical_matrix[idx,idx])+(1+kappa_int_rescaled[idx])/2.)
-    
-    for idx1 in range(num_dimensions):
-        for idx2 in range(idx1):
-            if type(operators[idx1]) is type(operators[idx2]):
-                sign = -1
-            else:
-                sign = +1
-
-            conditions_off_diag.append(dynamical_matrix[idx1,idx2]-sign*np.conj(dynamical_matrix[idx2,idx1]))
-
-    all_conditions = conditions_diag + conditions_off_diag
-
-    info = {
-        'dynamical_matrix': dynamical_matrix,
-        'determinant': np.linalg.det(inv_dynamical_matrix),
-        'conditions': all_conditions,
-        'conditions_diag': conditions_diag,
-        'conditions_off_diag': conditions_off_diag
-    }
-
-    return info
-
-
-def split_complex_variables(variables, real_imag_part=False):
-    real_variables = []
-    complex_variables = []
-    for var in variables:
-        if var.is_real:
-            real_variables.append(var)
-        else:
-            complex_variables.append(var)
-
-    num_complex_variables = len(complex_variables)
-    if real_imag_part:
-        raise NotImplementedError()
-    else:
-        abs_variables = []
-        phase_variables = []
-        subs_dict = {}
-        for var in complex_variables:
-            abs_variable = sp.Symbol(var.name+'abs', real=True)
-            phase_variable = sp.Symbol(var.name+'phase', real=True)
-            abs_variables.append(abs_variable)
-            phase_variables.append(phase_variable)
-            subs_dict[var] = abs_variable*sp.exp(sp.I*phase_variable)
-    
-    splitted_variables = real_variables+abs_variables+phase_variables
-    variable_types = [VAR_ABS]*len(real_variables) + [VAR_ABS]*len(abs_variables) + [VAR_PHASE]*len(phase_variables)
-
-    return splitted_variables, subs_dict, variable_types
+from multimode_systems.architecture import translate_upper_triangle_coupling_matrix_to_conditions
 
 
 AUTODIFF_FORWARD = 'autodiff_forward'
 AUTODIFF_REVERSE = 'autodiff_reverse'
 DIFFERENCE_QUOTIENT = '2-point'
 
-
-# Variable types
-# VAR_USER_DEFINED = 'user_defined'
 VAR_ABS = 'abs_variable'
-VAR_ERROR_ABS = 'error_abs_variable'
 VAR_PHASE = 'phase_variable'
 VAR_INTRINSIC_LOSS = 'intrinsic_loss_variable'
 VAR_USER_DEFINED = 'user_defined'
 
+ZERO_LOSS_MODE = 'zero_loss_mode'
+LOSSY_MODE = 'lossy_mode'
+
 INIT_ABS_RANGE_DEFAULT = [-1., 1.]
-INIT_KAPPA_RANGE_DEFAULT = [0.1, 1.]
-USER_DEFINED_RANGE_DEFAULT = [-np.pi, np.pi]
-INIT_ERROR_ABS_RANGE_DEFAULT = [-0.1, 0.1]
-BOUNDS_ERROR_ABS_DEFAULT = [-0.1, 0.1]
-BOUNDS_ABS_DEFAULT = [-np.inf, np.inf]
+INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [1.e-8, 2.]
+# BOUNDS_ABS_DEFAULT = [-np.inf, np.inf]
+BOUNDS_INTRINSIC_LOSS_DEFAULT = [1.e-8, np.inf]
+
+
+def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix):
+    num_modes = coupling_matrix.shape[0]
+    identity = jnp.eye(num_modes)
+    scattering_matrix = identity + jnp.linalg.inv(-1.j*coupling_matrix - (identity+kappa_int_matrix)/2.)
+    return scattering_matrix
+
+def create_solutions_dict(variables, values):
+    return {variable.name: value for variable, value in zip(variables, values)}
 
 class Architecture_Optimizer():
     def __init__(
-            self, S_target, num_modes, allow_errors_on_S_target=False,
-            phase_constraints_for_squeezing=False,
-            enforced_constraints=[], mode_types='no_squeezing',
-            port_intrinsic_losses=False,
-            gradient_method=AUTODIFF_FORWARD,
-            make_test_without_additional_constraints=True,
-            max_violation_success=1.e-5,
+            self,
+            S_target, num_auxiliary_modes, num_zero_loss_modes=0, mode_types='no_squeezing',
+            gradient_method=AUTODIFF_REVERSE,
+            signs_zero_loss_detunings=None,
             kwargs_optimization={},
-            kwargs_solver={}):
+            solver_options={},
+            S_target_free_symbols_init_range=None,
+            make_initial_test=True,
+            phase_constraints_for_squeezing=False,
+            free_gauge_phases=True,
+            port_intrinsic_losses=False,
+            method=None,
+            enforced_constraints=[]):
         
-        self.kwargs_optimization = kwargs_optimization
-        self.kwargs_optimization['interrupt_if_successful'] = True
-        self.kwargs_optimization['xtol'] = None
-        self.kwargs_optimization['max_violation_success'] = max_violation_success
+        self.kwargs_optimization = {
+            'num_tests': 10,
+            'verbosity': 0,
+            'init_abs_range': INIT_ABS_RANGE_DEFAULT,
+            'init_intrinsinc_loss_range': INIT_INTRINSIC_LOSS_RANGE_DEFAULT,
+            'bounds_intrinsic_loss': BOUNDS_INTRINSIC_LOSS_DEFAULT,
+            'max_violation_success': 1.e-10,
+        }
 
-        self.kwargs_solver = kwargs_solver
+        self.kwargs_optimization.update(kwargs_optimization)
+        self.kwargs_optimization['interrupt_if_successful'] = True
+
+        if method is None:
+            if self.kwargs_optimization['bounds_intrinsic_loss'] is None or port_intrinsic_losses is False:
+                method='BFGS'
+            else:
+                method='L-BFGS-B'
+
+        self.kwargs_optimization['method'] = method
+        
+        if method == 'BFGS':
+            self.solver_options = {'maxiter': 200}
+        elif method == 'L-BFGS-B':
+            self.solver_options = {'maxfun': np.inf, 'maxiter': 1000, 'ftol': 0., 'gtol': 0.}
+        else:
+            self.solver_options = {}
+        self.solver_options.update(solver_options)
 
         self.S_target = S_target
-        self.num_modes = num_modes
+
         self.num_port_modes = S_target.shape[0]
-        self.allow_errors_on_S_target = allow_errors_on_S_target
+        self.num_lossy_internal_modes = num_auxiliary_modes
+        self.num_lossy_modes = self.num_port_modes + num_auxiliary_modes
+        self.num_zero_loss_modes = num_zero_loss_modes
+        self.num_modes = self.num_port_modes + self.num_lossy_internal_modes + self.num_zero_loss_modes
+        self.mode_loss_info = [LOSSY_MODE]*self.num_lossy_modes + [ZERO_LOSS_MODE]*self.num_zero_loss_modes
+
+        self.signs_zero_loss_detunings = signs_zero_loss_detunings
+        self.free_gauge_phases = free_gauge_phases
+
+        if port_intrinsic_losses is True:
+            self.port_intrinsic_losses = np.array([True for _ in range(self.num_port_modes)])
+        elif port_intrinsic_losses is False:
+            self.port_intrinsic_losses = np.array([False for _ in range(self.num_port_modes)])
+        else:
+            self.port_intrinsic_losses = np.array(port_intrinsic_losses)
+
+        self.__prepare_mode_types__(mode_types)
         self.phase_constraints_for_squeezing = phase_constraints_for_squeezing
+        self.enforced_constraints = enforced_constraints
+        for idx2 in range(self.num_lossy_modes, self.num_modes):
+            for idx1 in range(self.num_lossy_modes, idx2+1):
+                constraint = msc.Coupling_Constraint(idx1, idx2)
+                if not constraint in self.enforced_constraints:
+                    self.enforced_constraints.append(constraint)
+        self.__setup_all_constraints__()
 
-        self.__initialize_variables__(port_intrinsic_losses)
+        self.coupling_matrix = self.__initialize_coupling_matrix__()
+        self.__initialize_parameters__(S_target_free_symbols_init_range)
+        self.conditions_func = jax.jit(self.__initialize_conditions_func__())
+        
+        self.gradient_method = gradient_method
+        if gradient_method == AUTODIFF_FORWARD:
+            self.jacobian = jax.jit(jax.jacfwd(self.conditions_func, has_aux=True))
+            # self.hessian = jax.jit(jax.jacfwd(self.jacobian), has_aux=True)
+        elif gradient_method == AUTODIFF_REVERSE:
+            self.jacobian = jax.jit(jax.jacrev(self.conditions_func, has_aux=True))
+            # self.hessian = jax.jit(jax.jacrev(self.jacobian), has_aux=True)
+        elif gradient_method == DIFFERENCE_QUOTIENT:
+            self.jacobian = None
+            self.hessian = None
+        else:
+            raise NotImplementedError()
+        
+        self.valid_combinations = []
+        self.invalid_combinations = []
+        self.tested_complexities = []
+        
+        # make run without additional conditions
+        if make_initial_test:
+            success, _, _ = self.repeated_optimization(conditions=[], **self.kwargs_optimization, **self.solver_options)
+            if not success:
+                raise(Exception('fully connected graph is invalid, interrupting'))
+            else:
+                print('fully connected graph is a valid graph')
 
+    def __setup_all_constraints__(self):
+        self.all_possible_constraints = []
+        for idx in range(self.num_modes):
+            self.all_possible_constraints.append(msc.Constraint_coupling_zero(idx, idx))
+        for idx2 in range(self.num_modes):
+            for idx1 in range(idx2):
+                if type(self.operators[idx1]) is type(self.operators[idx2]):
+                    self.all_possible_constraints.append(msc.Constraint_coupling_zero(idx1, idx2))
+                    self.all_possible_constraints.append(msc.Constraint_coupling_phase_zero(idx1, idx2))
+                else:
+                    self.all_possible_constraints.append(msc.Constraint_coupling_zero(idx1, idx2))
+                    if self.phase_constraints_for_squeezing:
+                        self.all_possible_constraints.append(msc.Constraint_coupling_phase_zero(idx1, idx2))
+
+    def check_all_constraints(self, coupling_matrix, kappa_int_matrix, max_violation):
+        fulfilled_constraints = []
+        for c in self.all_possible_constraints:
+            if np.abs(c(None, coupling_matrix, kappa_int_matrix))**2/2 < max_violation:
+                fulfilled_constraints.append(c)
+        
+        return arch.translate_conditions_to_upper_triangle_coupling_matrix(fulfilled_constraints, self.num_modes)
+
+    def __prepare_mode_types__(self, mode_types):
         if mode_types == 'no_squeezing':
-            self.mode_types = [True for _ in range(num_modes)]
+            self.mode_types = [True for _ in range(self.num_modes)]
         else:
             self.mode_types = mode_types
-        
         self.operators = []
-        for idx in range(num_modes):
+        for idx in range(self.num_modes):
             if self.mode_types[idx]:
                 self.operators.append(sym.Mode().a)
             else:
                 self.operators.append(sym.Mode().adag)
 
-        self.enforced_constraints = enforced_constraints
-        self.num_enforced_constraints = len(self.enforced_constraints)
-
-        self.all_possible_constraints = self.setup_all_constraints()
-
-        self.calc_conditions_and_all_constraints = jax.jit(setup_Bogoliubov_conditions(
-            self.operators,
-            self.S_extended_lambdified,
-            constraints=self.enforced_constraints+self.all_possible_constraints,
-            port_intrinsic_losses=self.port_intrinsic_losses
-        ))
-
-        offset = num_modes**2 + num_modes + self.num_enforced_constraints
-
-        self.mask_calc_all_possible_constraints = (jnp.arange(offset, offset+len(self.all_possible_constraints)))
-        def calc_all_possible_constraints(x):
-            return self.calc_conditions_and_all_constraints(x)[self.mask_calc_all_possible_constraints]
-        self.calc_all_possible_constraints = calc_all_possible_constraints #jax.jit(calc_all_possible_constraints)
-
-        self.gradient_method = gradient_method
-        if gradient_method == AUTODIFF_FORWARD:
-            self.calc_grad_conditions_and_all_constraints = jax.jit(jax.jacfwd(self.calc_conditions_and_all_constraints))
-        elif gradient_method == AUTODIFF_REVERSE:
-            self.calc_grad_conditions_and_all_constraints = jax.jit(jax.jacrev(self.calc_conditions_and_all_constraints))
-        elif gradient_method == DIFFERENCE_QUOTIENT:
-            self.calc_grad_conditions_and_all_constraints = None
+    def __init_gabs__(self, idx1, idx2, beamsplitter=True, append=False):
+        if beamsplitter:
+            varname = '|g_{'
         else:
-            raise NotImplementedError()
-        
-        #make run without additional conditions
-        if make_test_without_additional_constraints:
-            success, _, _ = self.repeated_optimization(constraints=[], **self.kwargs_optimization)
-            if not success:
-                print('unconditioned system cannot be solved, interrupting')
-            # return []
-        
-        #make run for each possible constraint
-        # self.all_possible_constraints = []
-        self.invalid_combinations = []
-        self.valid_combinations = []
-        self.tested_complexities = []
-        self.valid_combinations_solutions = []
+            varname = '|\\nu_{'
+        varname += str(idx1) + ','
+        varname += str(idx2)
+        varname += '}|'
+        new_variable = sp.Symbol(varname, real=True)
 
-    def __initialize_variables__(self, port_intrinsic_losses):
-        if self.allow_errors_on_S_target:
-            self.errorabss = {'errorabs%i%i'%(idx1,idx2): sp.Symbol('errorabs%i%i'%(idx1,idx2), real=True) for idx1 in range(self.num_port_modes) for idx2 in range(self.num_port_modes)}
-            self.errorphases = {'errorphase%i%i'%(idx1,idx2): sp.Symbol('errorphase%i%i'%(idx1,idx2), real=True) for idx1 in range(self.num_port_modes) for idx2 in range(self.num_port_modes)}
-            self.error_array = sp.zeros(self.num_port_modes)
-            for idx1 in range(self.num_port_modes):
-                for idx2 in range(self.num_port_modes):
-                    self.error_array[idx1,idx2] = self.errorabss['errorabs%i%i'%(idx1,idx2)] * sp.exp(sp.I*self.errorphases['errorphase%i%i'%(idx1,idx2)])
+        if append and not new_variable in self.gabs:
+            self.gabs.append(new_variable)
+
+        return new_variable
+    
+    def __init_gphase__(self, idx1, idx2, beamsplitter=True, append=False):
+        if beamsplitter:
+            varname = '\mathrm{arg}(g_{'
         else:
-            self.errorabss = {}
-            self.errorphases = {}
-            self.error_array = sp.zeros(self.num_port_modes)
+            varname = '\mathrm{arg}(\\nu_{'
+        varname += str(idx1) + ','
+        varname += str(idx2)
+        varname += '})'
+        new_variable = sp.Symbol(varname, real=True)
 
+        if append and not new_variable in self.gphases:
+            self.gphases.append(new_variable)
+
+        return new_variable
+    
+    def __init_Delta__(self, idx, append=False):        
+        new_variable = sp.Symbol('Delta%i'%idx, real=True)
+        if append and not new_variable in self.Deltas:
+            self.Deltas.append(new_variable)
+
+        return new_variable
+    
+    def __give_coupling_element__(self, idx1, idx2, operators, with_phase=True, append=False):
+        op1 = operators[idx1]
+        op2 = operators[idx2]
+
+        idxmin, idxmax = min(idx1, idx2), max(idx1, idx2)
+
+        # detuning
+        if idx1 == idx2:
+            detuning = self.__init_Delta__(idxmin, append=append)
+            if isinstance(op1, sym.Annihilation_operator):
+                return - detuning
+            else:
+                return detuning
+
+        # beamsplitter
+        elif type(op1) == type(op2):
+            gabs = self.__init_gabs__(idxmin, idxmax, beamsplitter=True, append=append)
+            if with_phase:
+                gphase = self.__init_gphase__(idxmin, idxmax, beamsplitter=True, append=append)
+            else:
+                gphase = sp.S(0)
+            coupling = gabs * sp.exp(sp.I*gphase)
+            if idx1 < idx2:
+                pass
+            else:
+                coupling = sp.conjugate(coupling) #beamsplitter coupling matrix is Hermitian
+
+            if isinstance(op1, sym.Annihilation_operator):
+                return coupling
+            else:
+                return - sp.conjugate(coupling)
+            
+        # squeezing
+        else:
+            gabs = self.__init_gabs__(idxmin, idxmax, beamsplitter=False, append=append)
+            if with_phase:
+                gphase = self.__init_gphase__(idxmin, idxmax, beamsplitter=False, append=append)
+            else:
+                gphase = sp.S(0)
+            coupling = gabs * sp.exp(sp.I*gphase)
+            if isinstance(op1, sym.Annihilation_operator):
+                return coupling
+            else:
+                return -sp.conjugate(coupling)
+
+    def __initialize_coupling_matrix__(self):
+        append = True
+        self.gabs = []
+        self.gphases = []
+        self.Deltas = []
+        coupling_matrix_dimensionless = sp.zeros(self.num_modes)
         
-        self.user_defined_variables = list(self.S_target.free_symbols)
-        self.user_defined_variables.sort(key=str)
-        for var in self.user_defined_variables:
+        for idx in range(self.num_modes):            
+            if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
+                coupling_matrix_dimensionless[idx, idx] = self.__give_coupling_element__(idx, idx, operators=self.operators, append=append)
+        
+        for idx1 in range(self.num_modes):
+            for idx2 in range(self.num_modes):
+                if idx1 != idx2:
+                    if not msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
+                        if not msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
+                            with_phase = True
+                        else:
+                            with_phase = False
+                        coupling_matrix_dimensionless[idx1, idx2] = self.__give_coupling_element__(idx1, idx2, with_phase=with_phase, operators=self.operators, append=append)
+
+        return coupling_matrix_dimensionless
+
+    # def __init_gabs__(self, idx1, idx2):
+    #     idx1, idx2 = sorted([idx1, idx2])
+    #     return sp.Symbol('gabs%i%i'%(idx1,idx2), real=True)
+    
+    # def __init_gphase__(self, idx1, idx2):
+    #     idx1, idx2 = sorted([idx1, idx2])
+    #     return sp.Symbol('gphase%i%i'%(idx1,idx2), real=True)
+    
+    # def __init_Delta__(self, idx):
+    #     return sp.Symbol('Delta%i'%idx, real=True)
+
+    # def __initialize_coupling_matrix__(self):
+    #     # initializes the coupling matrix
+
+    #     self.Deltas = []
+    #     self.gabs = [] 
+    #     self.gphases = [] 
+
+    #     if self.signs_zero_loss_detunings is None:
+    #         self.signs_zero_loss_detunings = np.ones(self.num_zero_loss_modes, dtype='int')
+    #     else:
+    #         self.signs_zero_loss_detunings = np.array(self.signs_zero_loss_detunings)
+    #     # coupling_matrix_not_lossy = sp.diag(*self.signs_zero_loss_detunings.tolist())
+
+    #     coupling_matrix = sp.zeros(self.num_modes)
+    #     for idx in range(self.num_modes):
+    #         if self.mode_loss_info[idx] == LOSSY_MODE:
+    #             if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
+    #                 Delta = self.__init_Delta__(idx)
+    #                 self.Deltas.append(Delta)
+    #                 coupling_matrix[idx,idx] = Delta
+    #             else:
+    #                 coupling_matrix[idx,idx] = 0
+    #         else:
+    #             coupling_matrix[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
+            
+    #     for idx2 in range(self.num_modes):
+    #         for idx1 in range(idx2):
+    #             if type(self.operators[idx1]) is type(self.operators[idx2]):
+    #                 sign = sp.S(1)
+    #             else:
+    #                 sign = -sp.S(1)
+                
+    #             gabs = self.__init_gabs__(idx1, idx2)
+    #             gphase = self.__init_gphase__(idx1, idx2)
+
+    #             if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE:
+    #                 if msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
+    #                     coupling_matrix_idx1_idx2 = 0
+    #                 elif msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
+    #                     coupling_matrix_idx1_idx2 = gabs
+    #                     self.gabs.append(gabs)
+    #                 else:
+    #                     coupling_matrix_idx1_idx2 = gabs * sp.exp(sp.I * gphase)
+    #                     self.gabs.append(gabs)
+    #                     self.gphases.append(gphase)
+                    
+    #                 coupling_matrix[idx1,idx2] = coupling_matrix_idx1_idx2
+    #                 coupling_matrix[idx2,idx1] = sign*sp.conjugate(coupling_matrix_idx1_idx2)
+    #             else:
+    #                 pass
+        
+    #     self.coupling_matrix = coupling_matrix
+
+    def __initialize_parameters__(self, S_target_free_symbols_init_range):
+
+        # free parameters in S_target
+        if S_target_free_symbols_init_range is None:
+            self.parameters_S_target = list(self.S_target.free_symbols)
+        else:
+            self.parameters_S_target = list(S_target_free_symbols_init_range.keys())
+        for var in self.parameters_S_target:
             if not var.is_real:
                 raise Exception('variable '+var.name+' is complex, only real variables are allowed')
-
-        if port_intrinsic_losses is True:
-            self.port_intrinsic_losses = [True for _ in range(self.num_port_modes)]
-        elif port_intrinsic_losses is False:
-            self.port_intrinsic_losses = [False for _ in range(self.num_port_modes)]
-        else:
-            self.port_intrinsic_losses = port_intrinsic_losses
         
-        self.paras_intrinsic_losses = []
+        # free Gauge phases
+        if self.free_gauge_phases:
+            self.gauge_phases = [sp.Symbol('gauge%i'%idx, real=True) for idx in range(self.num_port_modes)]
+            self.gauge_factors = [sp.exp(sp.I*phase) for phase in self.gauge_phases]
+            self.gauge_matrix = sp.zeros(self.num_port_modes)
+            for idx1 in range(self.num_port_modes):
+                for idx2 in range(self.num_port_modes):
+                    self.gauge_matrix[idx1,idx2] = self.gauge_factors[idx1]*sp.conjugate(self.gauge_factors[idx2])
+            # S_target_used = sp.matrices.dense.matrix_multiply_elementwise(self.S_target, self.gauge_matrix)
+        else:
+            self.gauge_phases = []
+            self.gauge_factors, self.gauge_factors, self.gauge_matrix = None, None, None
+            # S_target_used = self.S_target
+        
+        # internal losses
+        self.variables_intrinsic_losses = []
+        kappa_int_matrix_diag = []
         for mode_idx in range(self.num_port_modes):
             if self.port_intrinsic_losses[mode_idx]:
-                self.paras_intrinsic_losses.append(sp.Symbol('kappa_int%i'%mode_idx, real=True))
+                kappa_int = sp.Symbol('\gamma_%i'%mode_idx, real=True)
+                self.variables_intrinsic_losses.append(kappa_int)
+                kappa_int_matrix_diag.append(kappa_int)
+            else:
+                kappa_int_matrix_diag.append(sp.S(0))
+        kappa_int_matrix_diag += [sp.S(0) for _ in range(self.num_lossy_internal_modes)] 
+        self.kappa_int_matrix = sp.diag(*kappa_int_matrix_diag)
 
-        self.internal_mode_parameters, self.S_extended = sym.extend_matrix(self.S_target+self.error_array, self.num_modes, varnames='int')
-        self.splitted_internal_mode_parameters, self.subs_dict_split, self.variable_types_split = split_complex_variables(self.internal_mode_parameters)
-        self.S_extended_subs = self.S_extended.subs(self.subs_dict_split)
+        self.all_variables_list = \
+            self.Deltas + \
+            self.gabs + \
+            self.gphases + \
+            self.gauge_phases + \
+            self.parameters_S_target + \
+            self.variables_intrinsic_losses 
+        self.all_variables_types = \
+            [VAR_ABS]*len(self.Deltas+self.gabs) +\
+            [VAR_PHASE]*len(self.gphases) + \
+            [VAR_PHASE]*len(self.gauge_phases) + \
+            [VAR_USER_DEFINED]*len(self.parameters_S_target) + \
+            [VAR_INTRINSIC_LOSS]*len(self.variables_intrinsic_losses) 
+        self.S_target_free_symbols_init_range = S_target_free_symbols_init_range
+
+        self.S_target_jax = sp.utilities.lambdify(self.all_variables_list, self.S_target, modules='jax') 
+        self.coupling_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.coupling_matrix, modules='jax') 
+        self.kappa_int_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.kappa_int_matrix, modules='jax') 
+        if self.free_gauge_phases:
+            self.gauge_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.gauge_matrix, modules='jax') 
+        else:
+            self.gauge_matrix_jax = None
+    
+    def create_initial_guess(self, conditions=[], init_abs_range=None, phase_range=None, init_intrinsinc_loss_range=None):
+        if init_abs_range is None:
+            init_abs_range = [-1., 1.]
+        if phase_range is None:
+            phase_range = [-np.pi, np.pi]
+        if init_intrinsinc_loss_range is None:
+            init_intrinsinc_loss_range = INIT_INTRINSIC_LOSS_RANGE_DEFAULT
+
+        idxs_free = self.give_free_variable_idxs(conditions)
         
-        self.variables = self.user_defined_variables + self.splitted_internal_mode_parameters + self.paras_intrinsic_losses + list(self.errorabss.values()) + list(self.errorphases.values())
-        self.variable_types = [VAR_USER_DEFINED]*len(self.user_defined_variables) + self.variable_types_split + [VAR_INTRINSIC_LOSS] * np.sum(self.port_intrinsic_losses) + [VAR_ERROR_ABS] * len(self.errorabss) + [VAR_PHASE] * len(self.errorphases)
-        
-        self.S_extended_lambdified = jax.jit(sp.utilities.lambdify(list(self.variables), self.S_extended_subs, modules='jax'))
-
-    def setup_all_constraints(self):
-        all_constraints = []
-        for idx in range(self.num_modes):
-            all_constraints.append(msc.Constraint_coupling_zero(idx, idx))
-        for idx2 in range(self.num_modes):
-            for idx1 in range(idx2):
-                if type(self.operators[idx1]) is type(self.operators[idx2]):
-                    all_constraints.append(msc.Constraint_coupling_zero(idx1, idx2))
-                    all_constraints.append(msc.Constraint_coupling_phase_zero(idx1, idx2))
-                else:
-                    all_constraints.append(msc.Constraint_coupling_zero(idx1, idx2))
-                    if self.phase_constraints_for_squeezing:
-                        all_constraints.append(msc.Constraint_coupling_phase_zero(idx1, idx2))
-
-        # for cond in self.enforced_constraints:
-        #     if type(cond) is msc.Constraint_coupling_zero:
-        #         all_constraints.remove(cond)
-        #         phase_cond_to_remove = msc.Constraint_coupling_phase_zero(cond.idxs[0], cond.idxs[1])
-        #         if phase_cond_to_remove in all_constraints:
-        #             all_constraints.remove(phase_cond_to_remove)
-        #     elif type(cond) is msc.Constraint_coupling_phase_zero:
-        #         if cond in all_constraints:
-        #             all_constraints.remove(cond)
-        
-        return all_constraints
-
-    def create_initial_guess(self, init_abs_range=INIT_ABS_RANGE_DEFAULT, init_user_defined_range=USER_DEFINED_RANGE_DEFAULT, init_kappa_int_range=INIT_KAPPA_RANGE_DEFAULT, init_error_abs_range=INIT_ERROR_ABS_RANGE_DEFAULT,):
-        random_values = []
-        for var_type in self.variable_types:
+        random_guess = []
+        for var_idx, var_type in enumerate(self.all_variables_types):
             if var_type == VAR_ABS:
-                random_values.append(np.random.uniform(init_abs_range[0], init_abs_range[-1]))
-            elif var_type == VAR_USER_DEFINED:
-                random_values.append(np.random.uniform(init_user_defined_range[0], init_user_defined_range[-1]))
-            elif var_type == VAR_ERROR_ABS:
-                random_values.append(np.random.uniform(init_error_abs_range[0], init_error_abs_range[-1]))
+                random_guess.append(np.random.uniform(init_abs_range[0], init_abs_range[-1]))
             elif var_type == VAR_PHASE:
-                random_values.append(np.random.uniform(-np.pi, np.pi))
+                random_guess.append(np.random.uniform(phase_range[0], phase_range[-1]))
             elif var_type == VAR_INTRINSIC_LOSS:
-                random_values.append(np.random.uniform(init_kappa_int_range[0], init_kappa_int_range[-1]))
-            else:
-                raise NotImplementedError()
+                random_guess.append(np.random.uniform(init_intrinsinc_loss_range[0], init_intrinsinc_loss_range[-1]))
+            elif var_type == VAR_USER_DEFINED:
+                if self.S_target_free_symbols_init_range is None:
+                    user_defined_range = [-np.pi, np.pi]
+                else:
+                    user_defined_range = self.S_target_free_symbols_init_range[self.all_variables_list[var_idx]]
+                random_guess.append(np.random.uniform(user_defined_range[0], user_defined_range[-1]))
+        
+        return np.array(random_guess)[idxs_free], idxs_free
+
+    def setup_bounds(self, bounds_intrinsic_loss=None, free_idxs=None):
+        if bounds_intrinsic_loss is None or np.all(self.port_intrinsic_losses==False):
+            return None
+        else:
+            bounds = []
+            for var_type in self.all_variables_types:
+                if var_type==VAR_ABS or var_type == VAR_PHASE or var_type == VAR_USER_DEFINED:
+                    bounds.append([-np.inf, np.inf])
+                elif var_type == VAR_INTRINSIC_LOSS:
+                    bounds.append(bounds_intrinsic_loss)
+                else:
+                    raise NotImplementedError()
             
-        return jnp.array(random_values)
-    
-    def setup_bounds(self, bounds_abs=BOUNDS_ABS_DEFAULT, bounds_error_abs=BOUNDS_ERROR_ABS_DEFAULT):
-        bounds = []
-        for var_type in self.variable_types:
-            if var_type == VAR_PHASE or var_type == VAR_INTRINSIC_LOSS or var_type == VAR_USER_DEFINED:
-                bounds.append([-np.inf, np.inf])
-            elif var_type == VAR_ABS:
-                bounds.append(bounds_abs)
-            elif var_type == VAR_ERROR_ABS:
-                bounds.append(bounds_error_abs)
+            return np.asarray(bounds)[free_idxs]
+
+    def __initialize_conditions_func__(self):
+        self.enforced_constraints_beyond_coupling_constraint = []
+        for c in self.enforced_constraints:
+            if not isinstance(c, msc.Coupling_Constraint):
+                self.enforced_constraints_beyond_coupling_constraint.append(c)
+
+        if self.num_zero_loss_modes > 0:
+            def coupling_matrix_effective(input_array):
+                coupling_matrix = self.coupling_matrix_jax(*input_array)
+                coupling_matrix_lossy_modes = coupling_matrix[:self.num_lossy_modes,:self.num_lossy_modes]
+                coupling_matrix_lossy_not_lossy = coupling_matrix[:self.num_lossy_modes,self.num_lossy_modes:]
+                coupling_matrix_not_lossy_lossy = coupling_matrix[self.num_lossy_modes:,:self.num_lossy_modes]
+                coupling_matrix_not_lossy = coupling_matrix[self.num_lossy_modes:,self.num_lossy_modes:]
+
+                return coupling_matrix_lossy_modes - coupling_matrix_lossy_not_lossy @ jnp.linalg.inv(coupling_matrix_not_lossy) @ coupling_matrix_not_lossy_lossy
+        else:
+            def coupling_matrix_effective(input_array):
+                return self.coupling_matrix_jax(*input_array)
+        
+        self.coupling_matrix_effective = coupling_matrix_effective
+
+        if self.free_gauge_phases:
+            def calc_target_scattering_matrix(input_array):
+                return jnp.multiply(self.S_target_jax(*input_array), self.gauge_matrix_jax(*input_array))
+        else:
+            def calc_target_scattering_matrix(input_array):
+                return self.S_target_jax(*input_array)
+        
+        def calc_conditions(input_array):
+            scattering_matrix_target = calc_target_scattering_matrix(input_array)
+            coupling_matrix = self.coupling_matrix_effective(input_array)
+            kappa_int_matrix = self.kappa_int_matrix_jax(*input_array)
+            scattering_matrix = calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix)
+
+            shape_target = self.S_target.shape
+            difference = (scattering_matrix[:shape_target[0],:shape_target[1]] - scattering_matrix_target).flatten()
+
+            if len(self.enforced_constraints_beyond_coupling_constraint) > 0:
+                full_coupling_matrix = self.coupling_matrix_jax(*input_array)
+                additional_constraints = jnp.hstack([c(scattering_matrix, full_coupling_matrix, kappa_int_matrix) for c in self.enforced_constraints_beyond_coupling_constraint])
+                evaluated_conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference), additional_constraints))
             else:
+                evaluated_conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference)))
+            return jnp.sum(jnp.abs(evaluated_conditions)**2)/2, {'scattering_matrix': scattering_matrix, 'coupling_matrix': coupling_matrix}
+
+        return calc_conditions
+
+    def calc_scattering_matrix_from_parameter_dictionary(self, parameter_dictionary):
+        input_array = np.array([parameter_dictionary[var.name] for var in self.all_variables_list])
+        coupling_matrix = self.coupling_matrix_jax(*input_array)
+        kappa_int_matrix = self.kappa_int_matrix_jax(*input_array)
+        scattering_matrix = calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix)
+        return scattering_matrix
+
+    def give_free_variable_idxs(self, conditions):
+        free_variable_idxs = [idx for idx in range(len(self.all_variables_list))]
+        for c in conditions:
+            if type(c) == msc.Constraint_coupling_zero:
+                if c.idxs[0] != c.idxs[1]:
+                    beamsplitter = self.mode_types[c.idxs[0]] == self.mode_types[c.idxs[1]]
+                    gabs = self.__init_gabs__(c.idxs[0], c.idxs[1], beamsplitter=beamsplitter)
+                    gphase = self.__init_gphase__(c.idxs[0], c.idxs[1], beamsplitter=beamsplitter)
+                    if gabs in self.all_variables_list:
+                        free_variable_idxs.remove(self.all_variables_list.index(gabs))
+                    if gphase in self.all_variables_list:
+                        free_variable_idxs.remove(self.all_variables_list.index(gphase))
+                else:
+                    Delta = self.__init_Delta__(c.idxs[0])
+                    if Delta in self.all_variables_list:
+                        free_variable_idxs.remove(self.all_variables_list.index(Delta))
+            elif type(c) == msc.Constraint_coupling_phase_zero:
+                gphase = self.__init_gphase__(c.idxs[0], c.idxs[1])
+                if gphase in self.all_variables_list:
+                    free_variable_idxs.remove(self.all_variables_list.index(gphase))
+            else:
+                raise Exception('only architectural constraints are allowed')
+            
+        return free_variable_idxs
+
+    def give_conditions_func_with_conditions(self, conditions):
+        idxs_free_variables = self.give_free_variable_idxs(conditions)
+        np_idxs_free_variables = np.array(idxs_free_variables)
+
+        num_total_variables = len(self.all_variables_list)
+        def calc_conditions_constrained(partial_input_array):
+            full_input_array = np.zeros(num_total_variables)
+            full_input_array[idxs_free_variables] = partial_input_array
+                
+            return self.conditions_func(full_input_array)
+        
+        if self.gradient_method == DIFFERENCE_QUOTIENT:
+            calc_jacobian = '2-point'
+            calc_hessian = '2-point'
+        else:
+            def calc_jacobian_constrained(partial_input_array):
+                full_input_array = np.zeros(num_total_variables)
+                full_input_array[idxs_free_variables] = partial_input_array
+                # return self.jacobian(full_input_array)[jnp.array(idxs_free_variables)]
+                jacobian, aux_dict = self.jacobian(full_input_array)
+                return np.array(jacobian)[np_idxs_free_variables]
+            
+            def calc_hessian_constrained(partial_input_array):
                 raise NotImplementedError()
+                # full_input_array = np.zeros(num_total_variables)
+                # full_input_array[idxs_free_variables] = partial_input_array
+                # return np.take(np.take(np.array(self.hessian(full_input_array)), np_idxs_free_variables, axis=0), np_idxs_free_variables, axis=1)
+            
+            calc_jacobian = calc_jacobian_constrained
+            calc_hessian = calc_hessian_constrained
+  
+        return calc_conditions_constrained, calc_jacobian, calc_hessian
+
+    def complete_variable_arrays_with_zeros(self, variable_array, conditions):
+        free_variable_idxs = self.give_free_variable_idxs(conditions)
+        complete_variable_array = np.zeros(len(self.all_variables_list))
+        complete_variable_array[free_variable_idxs] = variable_array
+        return complete_variable_array
+
+    def optimize_given_conditions(self,
+                conditions=None, triu_matrix=None, verbosity=False,
+                init_abs_range=INIT_ABS_RANGE_DEFAULT,
+                init_intrinsinc_loss_range=INIT_INTRINSIC_LOSS_RANGE_DEFAULT,
+                bounds_intrinsic_loss=BOUNDS_INTRINSIC_LOSS_DEFAULT,
+                max_violation_success=1.e-5, 
+                calc_conditions_and_gradients=None,
+                method=None,
+                **kwargs_solver
+            ):
+        if conditions is None:
+            conditions = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
         
-        return np.asarray(bounds).T
-
-    def create_conditions_maps(self, constraints, enforced_constraints=True):
-        num_Bogoliubov_conditions = self.num_modes**2 + self.num_modes  # 2*number of elements in the upper triangle matrix
-        index_matrix = list(np.arange(num_Bogoliubov_conditions))
-        if enforced_constraints:
-            index_matrix += list(np.arange(num_Bogoliubov_conditions, num_Bogoliubov_conditions+self.num_enforced_constraints))
-        for idx in range(len(self.all_possible_constraints)):
-            if self.all_possible_constraints[idx] in constraints:
-                index_matrix += [idx+num_Bogoliubov_conditions+self.num_enforced_constraints,]
-
-        return index_matrix
-
-    def prepare_calc_conditions_and_gradients(self, constraints, enforced_constraints=True):
-        msc.check_overlapping_constraints(constraints)
-
-        indices = self.create_conditions_maps(constraints, enforced_constraints=enforced_constraints)
-        def calc_conditions(x):
-            result_conditions = np.array(self.calc_conditions_and_all_constraints(x))[indices]
-            # self.history_conditions.append(result_conditions)
-            # self.history_params.append(x)
-            return result_conditions
-        
-        if self.gradient_method == AUTODIFF_FORWARD or self.gradient_method == AUTODIFF_REVERSE:
-            def calc_gradients(x):
-                return np.array(self.calc_grad_conditions_and_all_constraints(x))[indices,:]
-        else:
-            calc_gradients = self.gradient_method
-
-        return calc_conditions, calc_gradients
-
-    def extract_kappa_int_rescaled_from_solution(self, solution):
-        kappa_int_rescaled = np.zeros(self.num_port_modes)
-        kappa_int_rescaled[self.port_intrinsic_losses] = [solution[kappa_int] for kappa_int in  self.paras_intrinsic_losses]
-        return np.concatenate((kappa_int_rescaled, np.zeros(self.num_modes-self.num_port_modes)))
-    
-    def optimize_given_constraints(self, constraints, verbose=False, max_nfev=None, enforced_constraints=True, init_abs_range=INIT_ABS_RANGE_DEFAULT, init_user_defined_range=USER_DEFINED_RANGE_DEFAULT, init_kappa_int_range=INIT_KAPPA_RANGE_DEFAULT, init_error_abs_range=INIT_ERROR_ABS_RANGE_DEFAULT, bounds_abs=BOUNDS_ABS_DEFAULT, bounds_error_abs=BOUNDS_ERROR_ABS_DEFAULT, max_violation_success=1.e-5, calc_conditions_and_gradients=None, **kwargs_solver):
-
-        # start_time = time.time()
         if calc_conditions_and_gradients is None:
-            calc_conditions, calc_gradients = self.prepare_calc_conditions_and_gradients(constraints, enforced_constraints=enforced_constraints)
+            calc_conditions, calc_gradients, _ = self.give_conditions_func_with_conditions(conditions)
         else:
-            calc_conditions, calc_gradients = calc_conditions_and_gradients
+            calc_conditions, calc_gradients, _ = calc_conditions_and_gradients
 
-        initial_guess = self.create_initial_guess(
-            init_abs_range=init_abs_range,
-            init_user_defined_range=init_user_defined_range,
-            init_kappa_int_range=init_kappa_int_range,
-            init_error_abs_range=init_error_abs_range
-        )
-        bounds = self.setup_bounds(bounds_abs, bounds_error_abs)
+        initial_guess, free_idxs = self.create_initial_guess(conditions=conditions, init_abs_range=init_abs_range, init_intrinsinc_loss_range=init_intrinsinc_loss_range)
+        if method is None:
+            if bounds_intrinsic_loss is None:
+                method = 'BFGS'
+            elif bounds_intrinsic_loss is not None:
+                method = 'L-BFGS-B'
 
-        # calc_conditions(initial_guess)
+        bounds = self.setup_bounds(bounds_intrinsic_loss, free_idxs)
 
-        # print('prepare:', time.time()-start_time)
-        # start_time = time.time()
-        solution, info_solution = sym.find_numerical_solution(calc_conditions, self.variables, initial_guess, method='least-squares', max_nfev=max_nfev, jac=calc_gradients, bounds=bounds, **kwargs_solver)
+        parameter_history = []
+        scattering_matrix_history = []
+        loss_history = []
 
-        # print('solve:', time.time()-start_time)
-        # start_time = time.time()
+        def callback(Xi, *args):
+            
+            loss, aux_dict = calc_conditions(Xi)
+            parameter_history.append(Xi)
+            scattering_matrix_history.append(aux_dict['scattering_matrix'])
+            loss_history.append(loss)
+            if loss < max_violation_success:
+                raise StopIteration('loss below threshold for success')
 
-        scattering_matrix_solution = self.S_extended_lambdified(*info_solution['x'])
+        xsol = sciopt.minimize(lambda x: calc_conditions(x)[0], initial_guess, jac=calc_gradients, bounds=bounds, callback=callback, method=method, options=kwargs_solver)
 
-        info_check = check_validity_of_dynamical_matrix(
-            self.operators,
-            scattering_matrix_solution,
-            kappa_int_rescaled=self.extract_kappa_int_rescaled_from_solution(solution)
-        )
+        success = np.all(np.abs(xsol['fun']) < self.kwargs_optimization['max_violation_success'])
+        solution_complete_array = self.complete_variable_arrays_with_zeros(xsol.x, conditions)
+        solution_effective_coupling_matrix = self.coupling_matrix_effective(solution_complete_array)
+        kappa_int_matrix = self.kappa_int_matrix_jax(*solution_complete_array)
 
-        max_violation_conditions = np.max(np.abs(info_solution['fun']))
-        max_violation_dynamical_matrix = np.max(np.abs(info_check['conditions']))
-
-        if max_violation_conditions < max_violation_success and max_violation_dynamical_matrix < max_violation_success:
-            success = SUCCESS_DYNAMICAL_AND_SCATTERING
-            optimizer_message = 'valid scattering matrix and valid dynamical matrix'
-        elif max_violation_conditions < max_violation_success:
-            success = SUCCESS_SCATTERING
-            optimizer_message = 'valid scattering matrix, but invalid dynamical matrix'
+        scattering_matrix_target_func = self.S_target_jax(*solution_complete_array)
+        if self.free_gauge_phases:
+            gauge_matrix = self.gauge_matrix_jax(*solution_complete_array)
+            scattering_matrix_target_times_gauge_matrix = scattering_matrix_target_func*gauge_matrix
         else:
-            success = SUCCESS_FAILED
-            optimizer_message = 'optimization failed'
+            gauge_matrix = None
+            scattering_matrix_target_times_gauge_matrix = scattering_matrix_target_func
 
+        solution_dict = self.dict_extract_relevant_information(xsol.x, conditions)
         info_out = {
-            'initial_guess': initial_guess,
-            'solution': solution,
-            'solution_array': info_solution['x'],
-            'final_cost': info_solution['cost'],
-            'optimality': info_solution['optimality'],
-            'conditions': info_solution['fun'],
-            'maximal_violation': max_violation_conditions,
-            'maximal_violation_dynamical_matrix': max_violation_dynamical_matrix,
+            'initial_guess': self.complete_variable_arrays_with_zeros(initial_guess, conditions),
+            'free_idxs': free_idxs,
+            'solution': solution_complete_array,
+            'solution_dict_complete': create_solutions_dict(self.all_variables_list, solution_complete_array),
+            'solution_dict': solution_dict,
+            'parameters_for_analysis': self.extract_cooperativities_and_human_defined_parameters(conditions, solution_dict),
+            'final_cost': xsol['fun'],
             'success': success,
-            'least_square_message': info_solution['message'],
-            'optimizer_message': optimizer_message,
-            'scattering_matrix': scattering_matrix_solution,
-            'dynamical_matrix': info_check['dynamical_matrix'],
-            'conditions_dynamical_matrix': info_check['conditions'],
-            'nfev': info_solution['nfev'],
-            'bounds': bounds
-            # 'njev': info_solution.njev,
-            # 'solver_status': info_solution.status,
-            # 'solver_message': info_solution.message,
-            # 'solver_success': info_solution.success
+            'optimizer_message': xsol['message'],
+            'effective_coupling_matrix': solution_effective_coupling_matrix,
+            'coupling_matrix': self.coupling_matrix_jax(*solution_complete_array),
+            'kappa_int_matrix': self.kappa_int_matrix_jax(*solution_complete_array),
+            'scattering_matrix': calc_scattering_matrix_from_coupling_matrix(solution_effective_coupling_matrix, kappa_int_matrix),
+            'scattering_matrix_target_func': scattering_matrix_target_func,
+            'scattering_matrix_target_times_gauge_matrix': scattering_matrix_target_times_gauge_matrix,
+            'gauge_matrix': gauge_matrix,
+            'nit': xsol['nit'],
+            'parameter_history': parameter_history,
+            'loss_history': loss_history,
+            'scattering_matrix_history': scattering_matrix_history,
+            'bounds': bounds,
         }
 
-        if verbose:
-            print(info_out['optimizer_message'])
-            print('optimality:', info_solution['optimality'])
-            print('maximal violation:', max_violation_conditions)
-            print('maximal violation of being a dynamical matrix:', max_violation_dynamical_matrix)
-
-        # print('check and output:', time.time()-start_time)
-        # start_time = time.time()
-
-        return solution, info_out
+        return success, info_out
     
-    def repeated_optimization(self, num_tests, constraints, verbosity_level=0, max_nfev=None, enforced_constraints=True, init_abs_range=INIT_ABS_RANGE_DEFAULT, init_user_defined_range=USER_DEFINED_RANGE_DEFAULT, init_kappa_int_range=INIT_KAPPA_RANGE_DEFAULT, init_error_abs_range=INIT_ERROR_ABS_RANGE_DEFAULT, bounds_abs=BOUNDS_ABS_DEFAULT, bounds_error_abs=BOUNDS_ERROR_ABS_DEFAULT, max_violation_success=1.e-5, interrupt_if_successful=False, ignore_conditions_dynamical_matrix=False, **kwargs_solver):
-        all_infos = []
-        success_idxs = []
+    def repeated_optimization(self,
+                num_tests, conditions=None, triu_matrix=None, verbosity=False,
+                init_abs_range=INIT_ABS_RANGE_DEFAULT,
+                init_intrinsinc_loss_range=INIT_INTRINSIC_LOSS_RANGE_DEFAULT,
+                bounds_intrinsic_loss=BOUNDS_INTRINSIC_LOSS_DEFAULT,
+                max_violation_success=1.e-5,
+                interrupt_if_successful=True,
+                **kwargs_solver
+            ):
+        
+        if conditions is None:
+            conditions = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
+        
+        calc_conditions_and_gradients = self.give_conditions_func_with_conditions(conditions)
 
-        if ignore_conditions_dynamical_matrix:
-            success_criteria = SUCCESS_SCATTERING
-        else:
-            success_criteria = SUCCESS_DYNAMICAL_AND_SCATTERING
-
-
-        if verbosity_level > 0:
-            if len(constraints) > 0:
-                print('optimizing with the following constraints:')
-                for c in constraints:
-                    print(c)
-            else:
-                print('optimizing without additional constraints')
-
-        calc_conditions_and_gradients = self.prepare_calc_conditions_and_gradients(constraints, enforced_constraints=enforced_constraints)
-
-        for test_idx in range(num_tests):
-            _, info = self.optimize_given_constraints(
-                constraints,
-                verbose=verbosity_level>1,
-                max_nfev=max_nfev,
+        successes = []
+        infos = []
+        for _ in range(num_tests):
+            success, info = self.optimize_given_conditions(
+                conditions=conditions, triu_matrix=triu_matrix, verbosity=verbosity,
                 init_abs_range=init_abs_range,
-                init_kappa_int_range=init_kappa_int_range,
-                init_error_abs_range=init_error_abs_range,
-                init_user_defined_range=init_user_defined_range,
+                init_intrinsinc_loss_range=init_intrinsinc_loss_range,
+                bounds_intrinsic_loss=bounds_intrinsic_loss,
                 max_violation_success=max_violation_success,
                 calc_conditions_and_gradients=calc_conditions_and_gradients,
-                bounds_abs=bounds_abs,
-                bounds_error_abs=bounds_error_abs,
                 **kwargs_solver
             )
-            all_infos.append(info)
-            if info['success'] == success_criteria:
-                success_idxs.append(test_idx)
-                if interrupt_if_successful:
-                    break
+            successes.append(success)
+            infos.append(info)
 
-        if len(success_idxs) > 0:
-            success = True
-        else:
-            success = False
-
-        if verbosity_level > 0 and not interrupt_if_successful:
-            if success:
-                print('success')
-            else:
-                print('failed')
-            print('%i out of %i runs were successfull'%(len(success_idxs), num_tests))
+            if success and interrupt_if_successful:
+                break
         
-        if verbosity_level > 0 and interrupt_if_successful:
-            if success:
-                print('found a solution after %i runs, continue with next solution set'%(test_idx+1))
-            else:
-                print('no solution found within %i runs'%num_tests)
-        
-        return success, all_infos, success_idxs
+        return np.any(successes), infos, np.where(successes)
     
     def prepare_all_possible_combinations(self):
         idxs_upper_triangle = np.triu_indices(self.num_modes)
-        # idxs_lower_triangle = np.tril_indices(self.num_modes)
-
-        # self.possible_matrix_entries = []
-        # for idx1, idx2 in np.array(idxs_upper_triangle).T:
-        #     if idx1 == idx2:
-        #         self.possible_matrix_entries.append([arch.NO_COUPLING, arch.DETUNING])
-        #     else:
-        #         if type(self.operators[idx1]) is type(self.operators[idx2]):
-        #             self.possible_matrix_entries.append([arch.NO_COUPLING, arch.COUPLING_WITHOUT_PHASE, arch.COUPLING_WITH_PHASE])
-        #         else:
-        #             if self.phase_constraints_for_squeezing:
-        #                 self.possible_matrix_entries.append([arch.NO_COUPLING, arch.COUPLING_WITHOUT_PHASE, arch.COUPLING_WITH_PHASE])
-        #             else:
-        #                 self.possible_matrix_entries.append([arch.NO_COUPLING, arch.COUPLING_WITH_PHASE])
-
-        # self.possible_matrix_entries = []
-        # for idx1, idx2 in np.array(idxs_upper_triangle).T:
-        #     allowed_entries = [arch.NO_COUPLING]
-        #     if msc.Constraint_coupling_zero(idx1,idx2) in self.enforced_constraints:
-        #         pass #no further possiblities are added
-        #     elif idx1 == idx2:
-        #         allowed_entries.append(arch.DETUNING)
-        #     elif msc.Constraint_coupling_phase_zero(idx1,idx2) in self.enforced_constraints:
-        #         allowed_entries.append(arch.COUPLING_WITHOUT_PHASE)
-        #     else:
-        #         if type(self.operators[idx1]) is type(self.operators[idx2]) or self.phase_constraints_for_squeezing:
-        #             allowed_entries.append(arch.COUPLING_WITHOUT_PHASE)
-        #         allowed_entries.append(arch.COUPLING_WITH_PHASE)
-
-        #     self.possible_matrix_entries.append(allowed_entries)
 
         self.possible_matrix_entries = []
         for idx1, idx2 in np.array(idxs_upper_triangle).T:
             if idx1 == idx2:
-                if msc.Constraint_coupling_zero(idx1,idx1) in self.enforced_constraints:
+                if self.mode_loss_info[idx1] == ZERO_LOSS_MODE:
+                    allowed_entries = [arch.DETUNING]
+                elif msc.Constraint_coupling_zero(idx1,idx1) in self.enforced_constraints:
                     allowed_entries = [arch.NO_COUPLING]
                 else:
                     allowed_entries = [arch.NO_COUPLING, arch.DETUNING]
             else:
-                allowed_entries = [arch.NO_COUPLING, arch.COUPLING_WITHOUT_PHASE, arch.COUPLING_WITH_PHASE]
-                if msc.Constraint_coupling_zero(idx1,idx2) in self.enforced_constraints:
-                    allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
-                    allowed_entries.remove(arch.COUPLING_WITH_PHASE)
-                elif msc.Constraint_coupling_phase_zero(idx1,idx2) in self.enforced_constraints:
-                    allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
-                
-                if type(self.operators[idx1]) != type(self.operators[idx2]):
-                    if not self.phase_constraints_for_squeezing:
-                        if arch.COUPLING_WITHOUT_PHASE in allowed_entries:
-                            allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
+                if self.mode_loss_info[idx1] == ZERO_LOSS_MODE and self.mode_loss_info[idx2] == ZERO_LOSS_MODE:
+                    allowed_entries = [arch.NO_COUPLING]
+                else:
+                    allowed_entries = [arch.NO_COUPLING, arch.COUPLING_WITHOUT_PHASE, arch.COUPLING_WITH_PHASE]
+                    if msc.Constraint_coupling_zero(idx1,idx2) in self.enforced_constraints:
+                        allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
+                        allowed_entries.remove(arch.COUPLING_WITH_PHASE)
+                    elif msc.Constraint_coupling_phase_zero(idx1,idx2) in self.enforced_constraints:
+                        allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
+                    
+                    if type(self.operators[idx1]) != type(self.operators[idx2]):
+                        if not self.phase_constraints_for_squeezing:
+                            if arch.COUPLING_WITHOUT_PHASE in allowed_entries:
+                                allowed_entries.remove(arch.COUPLING_WITHOUT_PHASE)
 
             self.possible_matrix_entries.append(allowed_entries)
-
-            
-            # allowed_entries = [arch.NO_COUPLING]
-            # if msc.Constraint_coupling_zero(idx1,idx2) in self.enforced_constraints:
-            #     pass #no further possiblities are added
-            # elif idx1 == idx2:
-            #     allowed_entries.append(arch.DETUNING)
-            # elif msc.Constraint_coupling_phase_zero(idx1,idx2) in self.enforced_constraints:
-            #     allowed_entries.append(arch.COUPLING_WITHOUT_PHASE)
-            # else:
-            #     if type(self.operators[idx1]) is type(self.operators[idx2]) or self.phase_constraints_for_squeezing:
-            #         allowed_entries.append(arch.COUPLING_WITHOUT_PHASE)
-            #     allowed_entries.append(arch.COUPLING_WITH_PHASE)
-
-            # self.possible_matrix_entries.append(allowed_entries)
-
 
         self.list_of_upper_triangular_coupling_matrices = []
         self.complexity_levels = []
         for p_coupl in tqdm(product(*self.possible_matrix_entries)):
-            # coupling_matrix = np.zeros([self.num_modes, self.num_modes])
-            # coupling_matrix[idxs_upper_triangle] = p_coupl
-            # coupling_matrix[idxs_lower_triangle] = (coupling_matrix.T)[idxs_lower_triangle]
-            # list_of_coupling_matrices.append(coupling_matrix)
             self.list_of_upper_triangular_coupling_matrices.append(np.array(p_coupl, dtype='int8'))
             self.complexity_levels.append(sum(p_coupl))
 
         self.complexity_levels = np.array(self.complexity_levels)
         self.unique_complexity_levels = np.flip(sorted(np.unique(self.complexity_levels)))
         self.list_of_upper_triangular_coupling_matrices = np.array(self.list_of_upper_triangular_coupling_matrices)
+        self.num_possible_graphs = len(self.list_of_upper_triangular_coupling_matrices)
 
 
-    def find_valid_combinations(self, complexity_level, combinations_to_test=None):
-        self.tested_complexities.append(complexity_level)
+    def find_valid_combinations(self, complexity_level, combinations_to_test=None, perform_graph_reduction_of_successfull_graphs=True):
+        
         newly_added_combos = []
         
         if combinations_to_test is None:
@@ -615,26 +734,27 @@ class Architecture_Optimizer():
         else:
             potential_combinations = combinations_to_test
 
+        count_tested = 0
+
         for combo_idx in trange(len(potential_combinations)):
             combo = potential_combinations[combo_idx]
             conditions = arch.translate_upper_triangle_coupling_matrix_to_conditions(combo)
             if not arch.check_if_subgraph_upper_triangle(combo, np.asarray(newly_added_combos)):
-                success, all_infos, _ = self.repeated_optimization(constraints=conditions, **self.kwargs_optimization, **self.kwargs_solver)
+                success, all_infos, _ = self.repeated_optimization(conditions=conditions, **self.kwargs_optimization, **self.solver_options)
+                count_tested += 1
                 if success:
-                    solution_array = all_infos[-1]['solution_array']
-                    all_constraints = self.check_all_possible_constraints(solution_array)
-                    self.valid_combinations_solutions.append(solution_array)
-
-                    idxs_fulfilled_constraints = np.where(np.abs(all_constraints) < self.kwargs_optimization['max_violation_success'])[0]
-                    fulfilled_constraints = [self.all_possible_constraints[idx] for idx in idxs_fulfilled_constraints]
-                    # msc.print_combo(fulfilled_constraints)
-                    valid_combo_to_add = arch.translate_conditions_to_upper_triangle_coupling_matrix(fulfilled_constraints, self.num_modes)
+                    if perform_graph_reduction_of_successfull_graphs:
+                        valid_combo_to_add = self.check_all_constraints(all_infos[-1]['coupling_matrix'], all_infos[-1]['kappa_int_matrix'], self.kwargs_optimization['max_violation_success'])
+                    else:
+                        valid_combo_to_add = combo
                     self.valid_combinations.append(valid_combo_to_add)
                     newly_added_combos.append(valid_combo_to_add)
                 else:
                     self.invalid_combinations.append(combo)
+        
+        self.tested_complexities.append([complexity_level, count_tested])
     
-    def identify_potential_combinations(self, complexity_level):
+    def identify_potential_combinations(self, complexity_level, skip_check_for_valid_subgraphs=False):
         all_idxs_with_desired_complexity = np.where(self.complexity_levels == complexity_level)[0]
         if len(all_idxs_with_desired_complexity) == 0:
             raise Warning('no architecture with the requrested complexity_level exists')
@@ -647,11 +767,15 @@ class Architecture_Optimizer():
             #check if suggested graph is subgraph of an invalid graph
             cond1 = not arch.check_if_subgraph_upper_triangle(np.asarray(self.invalid_combinations), coupling_matrix_combo)
 
-            #check if a valid architecture is a subgraph to the suggested graph 
-            cond2 = not arch.check_if_subgraph_upper_triangle(coupling_matrix_combo, np.asarray(self.valid_combinations))
-
-            if cond1 and cond2:
-                potential_combinations.append(coupling_matrix_combo)
+            if cond1:
+                #check if a valid architecture is a subgraph to the suggested graph 
+                if skip_check_for_valid_subgraphs:
+                    cond2 = True
+                else:
+                    cond2 = not arch.check_if_subgraph_upper_triangle(coupling_matrix_combo, np.asarray(self.valid_combinations))
+                
+                if cond2:
+                    potential_combinations.append(coupling_matrix_combo)
 
         return potential_combinations
     
@@ -668,57 +792,49 @@ class Architecture_Optimizer():
         
         self.valid_combinations = cleaned_valid_combinations
 
-    def calc_number_of_potential_combinations(self, num_constraints):
-        return len(self.identify_potential_combinations(num_constraints))
-
-    def check_all_possible_constraints(self, x):
-        return self.calc_all_possible_constraints(x)
+    def perform_depth_first_search(self):
+        print('prepare list of all possible graphs')
+        self.prepare_all_possible_combinations()
+        print('%i graphs identified'%len(self.list_of_upper_triangular_coupling_matrices))
+        print('start depth-first search')
+        for c in self.unique_complexity_levels:
+            print('test all graphs with %i degrees of freedom:'%c)
+            self.find_valid_combinations(c)
+            self.cleanup_valid_combinations()
+        print('optimisation finished, list of irreducible graphs has %i elements'%len(self.valid_combinations))
+        return np.array(self.valid_combinations, dtype='int8')
     
-    def calc_len_of_valid_combinations(self):
-        return np.asarray([len(combo) for combo in self.valid_combinations])
-    
-def check_for_overlap_with_invalid_combination(combination, invalid_combinations, return_debug_info=False):
-    #returns only True if there is no overlap
-    combo = set(combination)
-    for invalid_combo in invalid_combinations:
-        if invalid_combo.issubset(combo):
-            if return_debug_info:
-                return False, invalid_combo
-            return False
-    if return_debug_info:
-        return True, None
-    else:
-        return True
+    def dict_extract_relevant_information(self, solution_array, conditions=None, triu_matrix=None):
+        if conditions is None:
+            conditions = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
+        free_idxs = self.give_free_variable_idxs(conditions)
+        free_variables = [self.all_variables_list[idx] for idx in free_idxs]
+        return create_solutions_dict(free_variables, solution_array)
 
-def check_if_not_subset_of_valid_combination(combination, valid_combinations, return_debug_info=False):
-    #returns True if combination is not a subset of any element in valid_combinations
-    combo = set(combination)
-    for valid_combo in valid_combinations:
-        if combo.issubset(valid_combo):
-            if return_debug_info:
-                return False, valid_combo
-            else:
-                return False
-    if return_debug_info:
-        return True, None
-    else:
-        return True
+    def extract_cooperativities_and_human_defined_parameters(self, conditions, solution_dict):
+        cooperativity_dict = {}
+        
+        free_idxs = self.give_free_variable_idxs(conditions)
+        free_variables = [self.all_variables_list[idx] for idx in free_idxs]
 
-def cleanup_list_of_constraints(combo):
-    combo_cleaned = combo.copy()
-    for idx2 in range(len(combo)):
-        for idx1 in range(idx2):
-            constraint1 = combo[idx1]
-            constraint2 = combo[idx2]
-            if set([type(constraint1), type(constraint2)]) == set([msc.Constraint_coupling_zero, msc.Constraint_coupling_phase_zero]):
-                if set(constraint1.idxs) == set(constraint2.idxs):
-                    if type(constraint1) == msc.Constraint_coupling_phase_zero:
-                        combo_cleaned.remove(constraint1)
-                    if type(constraint2) == msc.Constraint_coupling_phase_zero:
-                        combo_cleaned.remove(constraint2)
-                
-    return combo_cleaned
+        for idx1 in range(self.num_modes):
+            for idx2 in range(self.num_modes):
+                key = self.__init_gabs__(idx1, idx2, beamsplitter=True)
+                if key in free_variables:
+                    cooperativity = 4 * np.abs(solution_dict[key.name])**2
+                    cooperativity_dict['C_{%i,%i}'%(idx1, idx2)] = cooperativity
+                key = self.__init_gabs__(idx1, idx2, beamsplitter=False)
+                if key in free_variables:
+                    cooperativity = 4 * np.abs(solution_dict[key.name])**2
+                    cooperativity_dict['C_{%i,%i}'%(idx1, idx2)] = cooperativity
 
-def print_combo(combo):
-    for el in combo:
-        print(el)
+        for idx in range(self.num_port_modes):
+            if self.port_intrinsic_losses[idx]:
+                key = '\gamma_%i'%idx
+                cooperativity_dict[key] = solution_dict[key]
+
+        for var in self.parameters_S_target:
+            key = var.name
+            cooperativity_dict[key] = solution_dict[key]
+
+        return cooperativity_dict
