@@ -3,3 +3,6 @@ scipy
 matplotlib
 jax
 networkx
+sympy
+tqdm
+IPython
