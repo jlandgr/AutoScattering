@@ -11,9 +11,12 @@ This repository allows you to design your own coupled mode setups with your desi
 ## Overview over available examples:
 
 
-## Clone repository
+## Installation
+We recommend create a new environment using venv or conda. The package can be installed with:
 ```
-git clone git@github.com:jlandgr/AutoScattering.git
+git clone https://github.com/jlandgr/autoscattering.git
+cd autoscattering
+python setup.py install
 ```
 
 ## Cite us
