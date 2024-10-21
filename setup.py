@@ -34,7 +34,7 @@ setup(
     long_description=open('README.md').read() if exists('README.md') else '',
     long_description_content_type="text/markdown",
     install_requires=[
-        'numpy', 'scipy', 'matplotlib', 'jax', 'networkx', 'sympy'
+        'numpy', 'scipy', 'matplotlib', 'jax', 'networkx', 'sympy', 'tqdm', 'IPython'
     ],
     python_requires=">=3.10",
     classifiers=['Operating System :: OS Independent',
