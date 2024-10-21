@@ -12,7 +12,7 @@ description = 'Automatic design of coupled mode setups'
 dist_name = 'autoscattering'
 package_name = 'autoscattering'
 year = '2024'
-url = 'https://github.com/jlandgr/AutoScattering'
+url = 'https://github.com/jlandgr/autoscattering'
 
 
 def get_version():
