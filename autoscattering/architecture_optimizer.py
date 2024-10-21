@@ -6,11 +6,11 @@ import scipy.optimize as sciopt
 from tqdm import trange, tqdm
 from itertools import product
 
-import multimode_systems.constraints as msc
-import multimode_systems.symbolic as sym
-import multimode_systems.architecture as arch
+import autoscattering.constraints as msc
+import autoscattering.symbolic as sym
+import autoscattering.architecture as arch
 
-from multimode_systems.architecture import translate_upper_triangle_coupling_matrix_to_conditions
+from autoscattering.architecture import translate_upper_triangle_coupling_matrix_to_conditions
 
 
 AUTODIFF_FORWARD = 'autodiff_forward'

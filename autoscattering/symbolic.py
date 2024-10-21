@@ -3,10 +3,6 @@ import sympy as sp
 import copy
 import scipy.optimize as sciopt
 
-# from sympy.utilities.lambdify import lambdify
-
-import multimode_systems.scattering as mss
-
 from IPython.display import display, Math
 
 def render(sympy_expr):
