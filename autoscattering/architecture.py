@@ -15,6 +15,20 @@ DETUNING = 1
 COUPLING_WITHOUT_PHASE = 1
 COUPLING_WITH_PHASE = 2
 
+def adjacency_to_triu_matrix(adjacency_matrix):
+    num_modes = len(adjacency_matrix)
+    triu_indices = np.triu_indices(num_modes)
+    return adjacency_matrix[triu_indices]
+
+def triu_to_adjacency_matrix(triu_matrix):
+    size_upper_triangle_matrix = len(triu_matrix)
+    num_modes = int((-1 + np.sqrt(1+4*2*size_upper_triangle_matrix))//2)
+    idxs_upper_triangle = np.array(np.triu_indices(num_modes))
+    adjacency_matrix = np.zeros([num_modes, num_modes], dtype='int8')
+    for idxs, value in zip(idxs_upper_triangle.T, triu_matrix):
+        adjacency_matrix[idxs[0], idxs[1]] = adjacency_matrix[idxs[1], idxs[0]] = value
+    return adjacency_matrix
+
 def characterize_architectures(list_of_architectures):
     
     list_of_detunings = []
