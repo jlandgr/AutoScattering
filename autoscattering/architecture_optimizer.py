@@ -106,6 +106,8 @@ class Architecture_Optimizer():
         self.__prepare_mode_types__(mode_types)
         self.phase_constraints_for_squeezing = phase_constraints_for_squeezing
         self.enforced_constraints = enforced_constraints
+
+        # add to enforced constraints, that no coupling is allowed between zero-loss modes
         for idx2 in range(self.num_lossy_modes, self.num_modes):
             for idx1 in range(self.num_lossy_modes, idx2+1):
                 constraint = msc.Coupling_Constraint(idx1, idx2)
@@ -265,85 +267,25 @@ class Architecture_Optimizer():
         self.Deltas = []
         coupling_matrix_dimensionless = sp.zeros(self.num_modes)
         
-        for idx in range(self.num_modes):            
-            if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
-                coupling_matrix_dimensionless[idx, idx] = self.__give_coupling_element__(idx, idx, operators=self.operators, append=append)
+        for idx in range(self.num_modes):
+            if self.mode_loss_info[idx] == LOSSY_MODE:            
+                if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
+                    coupling_matrix_dimensionless[idx, idx] = self.__give_coupling_element__(idx, idx, operators=self.operators, append=append)
+            else:
+                coupling_matrix_dimensionless[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
         
         for idx1 in range(self.num_modes):
             for idx2 in range(self.num_modes):
-                if idx1 != idx2:
-                    if not msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
-                        if not msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
-                            with_phase = True
-                        else:
-                            with_phase = False
-                        coupling_matrix_dimensionless[idx1, idx2] = self.__give_coupling_element__(idx1, idx2, with_phase=with_phase, operators=self.operators, append=append)
+                if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE: # current version of the code does not cover cases, where zero-loss modes are coupled with each other
+                    if idx1 != idx2: # diagional elements corresponds to detunings, they were already initialised in the previous for loop
+                        if not msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
+                            if not msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
+                                with_phase = True
+                            else:
+                                with_phase = False
+                            coupling_matrix_dimensionless[idx1, idx2] = self.__give_coupling_element__(idx1, idx2, with_phase=with_phase, operators=self.operators, append=append)
 
         return coupling_matrix_dimensionless
-
-    # def __init_gabs__(self, idx1, idx2):
-    #     idx1, idx2 = sorted([idx1, idx2])
-    #     return sp.Symbol('gabs%i%i'%(idx1,idx2), real=True)
-    
-    # def __init_gphase__(self, idx1, idx2):
-    #     idx1, idx2 = sorted([idx1, idx2])
-    #     return sp.Symbol('gphase%i%i'%(idx1,idx2), real=True)
-    
-    # def __init_Delta__(self, idx):
-    #     return sp.Symbol('Delta%i'%idx, real=True)
-
-    # def __initialize_coupling_matrix__(self):
-    #     # initializes the coupling matrix
-
-    #     self.Deltas = []
-    #     self.gabs = [] 
-    #     self.gphases = [] 
-
-    #     if self.signs_zero_loss_detunings is None:
-    #         self.signs_zero_loss_detunings = np.ones(self.num_zero_loss_modes, dtype='int')
-    #     else:
-    #         self.signs_zero_loss_detunings = np.array(self.signs_zero_loss_detunings)
-    #     # coupling_matrix_not_lossy = sp.diag(*self.signs_zero_loss_detunings.tolist())
-
-    #     coupling_matrix = sp.zeros(self.num_modes)
-    #     for idx in range(self.num_modes):
-    #         if self.mode_loss_info[idx] == LOSSY_MODE:
-    #             if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
-    #                 Delta = self.__init_Delta__(idx)
-    #                 self.Deltas.append(Delta)
-    #                 coupling_matrix[idx,idx] = Delta
-    #             else:
-    #                 coupling_matrix[idx,idx] = 0
-    #         else:
-    #             coupling_matrix[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
-            
-    #     for idx2 in range(self.num_modes):
-    #         for idx1 in range(idx2):
-    #             if type(self.operators[idx1]) is type(self.operators[idx2]):
-    #                 sign = sp.S(1)
-    #             else:
-    #                 sign = -sp.S(1)
-                
-    #             gabs = self.__init_gabs__(idx1, idx2)
-    #             gphase = self.__init_gphase__(idx1, idx2)
-
-    #             if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE:
-    #                 if msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
-    #                     coupling_matrix_idx1_idx2 = 0
-    #                 elif msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
-    #                     coupling_matrix_idx1_idx2 = gabs
-    #                     self.gabs.append(gabs)
-    #                 else:
-    #                     coupling_matrix_idx1_idx2 = gabs * sp.exp(sp.I * gphase)
-    #                     self.gabs.append(gabs)
-    #                     self.gphases.append(gphase)
-                    
-    #                 coupling_matrix[idx1,idx2] = coupling_matrix_idx1_idx2
-    #                 coupling_matrix[idx2,idx1] = sign*sp.conjugate(coupling_matrix_idx1_idx2)
-    #             else:
-    #                 pass
-        
-    #     self.coupling_matrix = coupling_matrix
 
     def __initialize_parameters__(self, S_target_free_symbols_init_range):
 
@@ -456,11 +398,12 @@ class Architecture_Optimizer():
 
         if self.num_zero_loss_modes > 0:
             def coupling_matrix_effective(input_array):
-                coupling_matrix = self.coupling_matrix_jax(*input_array)
-                coupling_matrix_lossy_modes = coupling_matrix[:self.num_lossy_modes,:self.num_lossy_modes]
-                coupling_matrix_lossy_not_lossy = coupling_matrix[:self.num_lossy_modes,self.num_lossy_modes:]
-                coupling_matrix_not_lossy_lossy = coupling_matrix[self.num_lossy_modes:,:self.num_lossy_modes]
-                coupling_matrix_not_lossy = coupling_matrix[self.num_lossy_modes:,self.num_lossy_modes:]
+                # calculate effective coupling matrix between the lossy modes, see Supplemental Material in paper
+                coupling_matrix = self.coupling_matrix_jax(*input_array) # full coupling matrix
+                coupling_matrix_lossy_modes = coupling_matrix[:self.num_lossy_modes,:self.num_lossy_modes] # coupling matrix between all lossy modes (port and auxiliary modes)
+                coupling_matrix_lossy_not_lossy = coupling_matrix[:self.num_lossy_modes,self.num_lossy_modes:] # coupling between zero-loss modes and lossy modes
+                coupling_matrix_not_lossy_lossy = coupling_matrix[self.num_lossy_modes:,:self.num_lossy_modes] # the other way round
+                coupling_matrix_not_lossy = coupling_matrix[self.num_lossy_modes:,self.num_lossy_modes:] # coupling between zero-loss modes (only considering detunings, which are set to +/- 1 for rescaling)
 
                 return coupling_matrix_lossy_modes - coupling_matrix_lossy_not_lossy @ jnp.linalg.inv(coupling_matrix_not_lossy) @ coupling_matrix_not_lossy_lossy
         else:
