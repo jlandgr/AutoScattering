@@ -2,6 +2,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import tqdm
+from itertools import product
 
 from autoscattering.constraints import Constraint_coupling_zero, Constraint_coupling_phase_zero
 
@@ -14,6 +15,89 @@ NO_COUPLING = 0
 DETUNING = 1
 COUPLING_WITHOUT_PHASE = 1
 COUPLING_WITH_PHASE = 2
+
+def find_min_number_of_pumps(triu_matrix):
+    '''
+    Identifies the minimum number of parametric pumps required to realise this graph
+    To do so, we label all modes. If two modes have the same label, they are operated at the same frequency, otherwise they are not.
+    To find the minimum number of pumps we iterate over all possible labeling combinations. 
+    '''
+
+    def check_redundancy(labels):
+        # returns False for combinations, like [0,0,2,3,4] as they are identical with [0,0,1,2,3]
+        unique_labels = np.unique(labels)
+        if np.max(unique_labels) >= len(unique_labels):
+            return False
+        else:
+            return True
+    
+    upper_triu_adjacency_matrix = triu_to_upper_triu_adjacency_matrix(triu_matrix)
+    num_modes = upper_triu_adjacency_matrix.shape[0]
+    
+    counted_pumps = []
+    possible_labels = np.arange(num_modes)
+
+    possible_labels = []
+    for idx in range(num_modes):
+        possible_labels.append(np.arange(idx+1))
+
+    labels_results = []
+    for labels in product(*possible_labels):
+        if check_redundancy(labels):
+            result = count_pumps(labels, upper_triu_adjacency_matrix=upper_triu_adjacency_matrix)
+            if result is not None:
+                counted_pumps.append(result)
+                labels_results.append(labels)
+
+    counted_pumps = np.array(counted_pumps)
+    labels_results = np.array(labels_results)
+
+    num_min_pumps = np.min(counted_pumps)
+    idxs_min = counted_pumps == num_min_pumps
+
+    return num_min_pumps, labels_results[idxs_min]
+
+def triu_to_upper_triu_adjacency_matrix(triu_matrix):
+    '''
+    transform a graph in list form to its adjacency matrix, where the lower triangle is set to zero
+    the full adjacency matrix would be provided by the function triu_to_adjacency_matrix
+    '''
+    size_upper_triangle_matrix = len(triu_matrix)
+    num_modes = int((-1 + np.sqrt(1+4*2*size_upper_triangle_matrix))//2)
+    idxs_upper_triangle = np.array(np.triu_indices(num_modes))
+    adjacency_matrix = np.zeros([num_modes, num_modes], dtype='int8')
+    for idxs, value in zip(idxs_upper_triangle.T, triu_matrix):
+        adjacency_matrix[idxs[0], idxs[1]] = value
+    return adjacency_matrix
+
+def count_pumps(labels, triu_matrix=None, upper_triu_adjacency_matrix=None):
+    '''
+    Counts the number of parametric pumps given a certain graph and labels
+
+    labels: list of integers equalling the number of modes. If two modes have the same label (the same integer), the are operated at the same frequency. Modes with different labels are operated at different frequencies
+    triu_matrix: defines the graph as a list containing the elements of the upper triangular matrix of the adjacency matrix
+    upper_triu_adjacency_matrix: adjacency matrix, where the lower triangle is set to zero. Passing an actual adjacency matrix will result in a miscounting!
+
+    If both triu_matrix and upper_triu_adjacency_matrix are passed, the function will use triu_matrix
+    '''
+    if triu_matrix is not None:
+        upper_triu_adjacency_matrix = triu_to_upper_triu_adjacency_matrix(triu_matrix)
+
+    # if a coupling is either a complex-valued beamsplitter interaction or a squeezing interaction the labels have to be different between the modes connected by the correspond edge
+    # this loop tests if this is the case, if not the function returns None as the labeling is not valid
+    idxs1, idxs2 = np.where(upper_triu_adjacency_matrix==COUPLING_WITH_PHASE)
+    for idx1, idx2 in zip(idxs1, idxs2):
+        if labels[idx1] == labels[idx2]:
+            return None
+    
+    # Now we count the pumps. We sum over all edges. If an edge connects two modes with a different label, a pump is required, otherwise not.
+    num_pumps = 0
+    idxs1, idxs2 = np.where(upper_triu_adjacency_matrix!=NO_COUPLING)
+    for idx1, idx2 in zip(idxs1, idxs2):
+        if labels[idx1] != labels[idx2]:
+            num_pumps += 1
+
+    return num_pumps
 
 def adjacency_to_triu_matrix(adjacency_matrix):
     num_modes = len(adjacency_matrix)
@@ -32,19 +116,23 @@ def triu_to_adjacency_matrix(triu_matrix):
 def characterize_architectures(list_of_architectures):
     
     list_of_detunings = []
-    list_of_passive_couplings = []
-    list_of_active_couplings = []
+    list_of_real_valued_couplings = []
+    num_complex_couplings_and_squeezings = []
+    minimal_number_of_pumps = []
     for arch_idx in tqdm.trange(len(list_of_architectures)):
         arch = list_of_architectures[arch_idx]
         num_detunings, num_passive, num_active = characterize_architecture(arch)
         list_of_detunings.append(num_detunings)
-        list_of_passive_couplings.append(num_passive)
-        list_of_active_couplings.append(num_active)
+        list_of_real_valued_couplings.append(num_passive)
+        num_complex_couplings_and_squeezings.append(num_active)
+        min_number, _ = find_min_number_of_pumps(arch)
+        minimal_number_of_pumps.append(min_number)
     info_dict = {
         'num_detunings': np.asarray(list_of_detunings),
-        'num_real_couplings': np.asarray(list_of_passive_couplings),
-        'num_complex_couplings': np.asarray(list_of_active_couplings),
-        'num_couplings': np.asarray(list_of_passive_couplings)+np.asarray(list_of_active_couplings)
+        'num_real_couplings': np.asarray(list_of_real_valued_couplings),
+        'num_complex_couplings_and_squeezings': np.asarray(num_complex_couplings_and_squeezings),
+        'num_couplings': np.asarray(list_of_real_valued_couplings)+np.asarray(num_complex_couplings_and_squeezings),
+        'minimal_number_of_pumps': np.asarray(minimal_number_of_pumps)
     }
     return info_dict
 
@@ -55,17 +143,17 @@ def characterize_architecture(arch):
     idxs_upper_triangle = np.array(np.triu_indices(num_modes))
 
     num_detunings = 0
-    num_passive_couplings = 0
-    num_active_couplings = 0
+    num_real_valued_couplings = 0
+    num_complex_valued_couplings_and_squeezing = 0
     for idx1, idx2, val_coupling in zip(idxs_upper_triangle[0], idxs_upper_triangle[1], arch):
         if val_coupling != NO_COUPLING:
             if idx1 == idx2:
                 num_detunings += 1
             elif val_coupling == COUPLING_WITHOUT_PHASE:
-                num_passive_couplings += 1
+                num_real_valued_couplings += 1
             else:
-                num_active_couplings += 1
-    return num_detunings, num_passive_couplings, num_active_couplings
+                num_complex_valued_couplings_and_squeezing += 1
+    return num_detunings, num_real_valued_couplings, num_complex_valued_couplings_and_squeezing
 
 def translate_graph_to_conditions(graph):
     num_modes = graph.shape[0]
