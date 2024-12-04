@@ -12,7 +12,7 @@ This repository allows you to design your own coupled mode setups with your desi
 3_directional_coupler.ipynb: Discovers the graphs to realise a directional coupler. You can try out the code [on Google Colab](https://colab.research.google.com/github/jlandgr/autoscattering/blob/main/3_directional_coupler.ipynb) \
 4_directional_coupler.ipynb: Analyses and Generalises the discovered directional coupler graphs. You can try out the code [on Google Colab](https://colab.research.google.com/github/jlandgr/autoscattering/blob/main/4_directional_coupler_generalisation.ipynb) \
 5_directional_quantum_limited_amplifier.ipynb: Discovers and generalises a fully-directional quantum-limited amplifer. You can try out the code [on Google Colab](https://colab.research.google.com/github/jlandgr/autoscattering/blob/main/5_directional_quantum_limited_amplifier.ipynb) \
-6_optomechanical_circulator.ipynb:  Design an optomechanical circulator and introduces the far-detuned mode. You can try out the code [on Google Colab](https://colab.research.google.com/github/jlandgr/autoscattering/blob/main/6_optomechanical_circulator.ipynb) \
+6_optomechanical_circulator.ipynb:  Design an optomechanical circulator and introduces the far-detuned mode. You can try out the code [on Google Colab](https://colab.research.google.com/github/jlandgr/autoscattering/blob/main/6_optomechanical_circulator.ipynb) 
 
 ## Installation
 We recommend create a new environment using venv or conda. The package can be installed with:
