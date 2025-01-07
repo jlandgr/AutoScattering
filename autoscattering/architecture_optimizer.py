@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import sympy as sp
 import scipy.optimize as sciopt
 from tqdm import trange, tqdm
-from itertools import product
+from itertools import product, permutations
 
 import autoscattering.constraints as msc
 import autoscattering.symbolic as sym
@@ -39,6 +39,63 @@ def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matri
 
 def create_solutions_dict(variables, values):
     return {variable.name: value for variable, value in zip(variables, values)}
+
+def find_minimum_number_auxiliary_modes(start_value=0, max_value=5, allow_squeezing=False, **kwargs_optimizer):
+    '''
+    This function aims to identify the minimum number of auxiliary modes required to realise a certain target behaviour
+
+    Parameters:
+    - start_value: number of auxiliary modes from which the search is started (default 0)
+    - max_value: maximum number of auxiliary modes tested during the search (default 5)
+    - allow_squeezing: boolen, determins if squeezing is allowed or not (default False).
+    - **kwargs_optimizer: All those arguments will be passed directly to the optimizer.
+      Typically you would like to pass S_target (and optionally enforced_constraints) to determine the target behaviour.
+      See Architecture_Optimizer class for more details
+
+    Returns:
+    If search is successfull, the function returns a optimizer class, with the number of auxiliary modes set to the discovered minimum 
+    Else, None is returned
+    If allow_squeezing is set to True, the function will automatically test for all possible combinations of assigning the modes
+    to subclasses $M_1$ and $M_2$ (see Appendix F) and will return a list of optimizers with all possible combinations instead
+
+    Example use:
+    # Directional coupler, see Fig. 3(b)
+    t = sp.Symbol('t', real=True)
+    S_target = sp.Matrix([[0,0,0],[0,0,0],[t,t,0]])
+    optimizer = arch_opt.find_minimum_number_auxiliary_modes(S_target=S_target, start_value=0, max_value=5)
+
+    # Directional amplifier (without intrinsic loss on port modes), see Fig. 3(c) and notebook 5 for more details
+    Gval = 3. # target gain value
+    S_target = sp.Matrix([[0,0],[np.sqrt(Gval),0]])
+    enforced_constraints = [MinimalAddedInputNoise(), MinimalAddedOutputNoise(Gval=Gval)]
+    optimizers = arch_opt.find_minimum_number_auxiliary_modes(S_target, enforced_constraints=enforced_constraints, allow_squeezing=True)
+    '''
+
+    minimum_number_auxiliary_modes = None
+
+    for num_auxiliary_modes in range(start_value, max_value+1):
+        print('testing %i auxiliary modes'%num_auxiliary_modes)
+        optimizer = Architecture_Optimizer(
+            num_auxiliary_modes=num_auxiliary_modes,
+            **kwargs_optimizer,
+            make_initial_test=False
+        )
+
+        success, _, _ = optimizer.repeated_optimization(conditions=[], **optimizer.kwargs_optimization, **optimizer.solver_options)
+        if success:
+            minimum_number_auxiliary_modes = num_auxiliary_modes
+
+        if minimum_number_auxiliary_modes is not None:
+            break
+        else:
+            print('not successfull')
+
+    if minimum_number_auxiliary_modes is not None:
+        print('success, minimum number of auxiliary modes is %i'%minimum_number_auxiliary_modes)
+        return optimizer
+    else:
+        print('minimum number of auxiliary modes not found within interval [%i,%i]'%(start_value, max_value))
+        return None
 
 class Architecture_Optimizer():
     def __init__(
@@ -161,7 +218,7 @@ class Architecture_Optimizer():
     def check_all_constraints(self, coupling_matrix, kappa_int_matrix, max_violation):
         fulfilled_constraints = []
         for c in self.all_possible_constraints:
-            if np.abs(c(None, coupling_matrix, kappa_int_matrix))**2/2 < max_violation:
+            if np.abs(c(None, coupling_matrix, kappa_int_matrix, self.mode_types))**2/2 < max_violation:
                 fulfilled_constraints.append(c)
         
         return arch.translate_conditions_to_upper_triangle_coupling_matrix(fulfilled_constraints, self.num_modes)
@@ -430,7 +487,7 @@ class Architecture_Optimizer():
 
             if len(self.enforced_constraints_beyond_coupling_constraint) > 0:
                 full_coupling_matrix = self.coupling_matrix_jax(*input_array)
-                additional_constraints = jnp.hstack([c(scattering_matrix, full_coupling_matrix, kappa_int_matrix) for c in self.enforced_constraints_beyond_coupling_constraint])
+                additional_constraints = jnp.hstack([c(scattering_matrix, full_coupling_matrix, kappa_int_matrix, self.mode_types) for c in self.enforced_constraints_beyond_coupling_constraint])
                 evaluated_conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference), additional_constraints))
             else:
                 evaluated_conditions = jnp.hstack((jnp.real(difference), jnp.imag(difference)))
@@ -781,3 +838,121 @@ class Architecture_Optimizer():
             cooperativity_dict[key] = solution_dict[key]
 
         return cooperativity_dict
+    
+
+def generate_all_possible_mode_assignments(num_port_modes, num_auxiliary_modes, auxiliary_modes_exchangable=True):
+    '''
+    generates list of all possible assignments of the modes to the subsets M_1 and M_2 to ensure the phase-preserving property, see Appendix F for more details
+    if auxiliary_modes_exchangable is True, we consider auxiliary modes to be exchangable. 
+    '''
+
+    def negate(array):
+        return ~array
+
+    num_modes = num_port_modes + num_auxiliary_modes
+    
+    idxs_ports = np.arange(num_port_modes)
+    idxs_auxiliary = np.arange(num_port_modes, num_modes)
+
+    # generate list of all possible reorderings of auxiliary modes
+    all_orders = []
+    for subset in permutations(idxs_auxiliary):
+        all_orders.append(tuple(idxs_ports) + subset)
+
+    all_possible_values = [[True, False]] * num_modes
+    all_possible_combinations = []
+    for p in product(*all_possible_values):
+        p = np.array(p)
+        if auxiliary_modes_exchangable:
+            to_add = True
+            # check for overlap with previous combinations
+            # exclude all those which are symmetric under reordering of the auxiliary modes and particle-hole symmetry
+            for p_prev in all_possible_combinations:
+                for order in all_orders:
+                    # if np.all(p == p_prev):
+                    if np.all(p == p_prev[[order]]):
+                        to_add = False
+
+                    if np.all(p == ~p_prev[[order]]):
+                        to_add = False
+            
+            if to_add:
+                all_possible_combinations.append(p)
+        else:
+            all_possible_combinations.append(p)
+
+    return all_possible_combinations
+
+
+def find_minimum_number_auxiliary_modes(S_target, start_value=0, max_value=5, allow_squeezing=False, **kwargs_optimizer):
+    '''
+    This function aims to identify the minimum number of auxiliary modes required to realise a certain target behaviour
+
+    Parameters:
+    - S_target: target scattering behaviour
+    - start_value: number of auxiliary modes from which the search is started (default 0)
+    - max_value: maximum number of auxiliary modes tested during the search (default 5)
+    - allow_squeezing: boolen, determins if squeezing is allowed or not (default False).
+    - **kwargs_optimizer: All those arguments will be passed directly to the optimizer.
+      See Architecture_Optimizer class for more details
+
+    Returns:
+    If search is successfull, the function returns a optimizer class, with the number of auxiliary modes set to the discovered minimum 
+    Else, None is returned
+    If allow_squeezing is set to True, the function will automatically test for all possible combinations of assigning the modes
+    to subclasses $M_1$ and $M_2$ (see Appendix F) and will return a list of optimizers with all possible combinations instead
+
+    Example use:
+    # Directional coupler, see Fig. 3(b)
+    t = sp.Symbol('t', real=True)
+    S_target = sp.Matrix([[0,0,0],[0,0,0],[t,t,0]])
+    optimizer = find_minimum_number_auxiliary_modes(S_target, start_value=0, max_value=5)
+
+    # Directional amplifier (without intrinsic loss on port modes), see Fig. 3(c)
+    '''
+
+    minimum_number_auxiliary_modes = None
+
+    for num_auxiliary_modes in range(start_value, max_value+1):
+        print('testing %i auxiliary modes'%num_auxiliary_modes)
+
+        if allow_squeezing:
+            all_possible_assignments = generate_all_possible_mode_assignments(num_port_modes=S_target.shape[0], num_auxiliary_modes=num_auxiliary_modes)
+        else:
+            all_possible_assignments = ['no_squeezing']
+
+        successful_assignments = []
+        successful_optimizers = []
+
+        for assignment in all_possible_assignments:
+            optimizer = Architecture_Optimizer(
+                S_target=S_target,
+                num_auxiliary_modes=num_auxiliary_modes,
+                mode_types=list(assignment),
+                **kwargs_optimizer,
+                make_initial_test=False
+            )
+
+            success, _, _ = optimizer.repeated_optimization(conditions=[], **optimizer.kwargs_optimization, **optimizer.solver_options)
+            if success:
+                successful_optimizers.append(optimizer)
+                successful_assignments.append(assignment)
+
+        if len(successful_assignments) != 0:
+            minimum_number_auxiliary_modes = num_auxiliary_modes
+            break
+        else:
+            print('not successfull')
+
+    if minimum_number_auxiliary_modes is not None:
+        print('success, minimum number of auxiliary modes is %i'%minimum_number_auxiliary_modes)
+        if allow_squeezing:
+            print('successful assignments of particles and holes:')
+            for assignment in successful_assignments:
+                print(assignment)
+            return successful_optimizers
+        else:
+            return optimizer
+    else:
+        print('minimum number of auxiliary modes not found within interval [%i,%i]'%(start_value, max_value))
+        return None

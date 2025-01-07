@@ -23,7 +23,7 @@ class Base_Constraint():
     def __init__(self):
         pass
 
-    def __call__(self, S, coupling_matrix, kappa_int_matrix):
+    def __call__(self, S, coupling_matrix, kappa_int_matrix, mode_tyes):
         raise NotImplementedError()
     
     def __equ__(self, other_object):
@@ -46,7 +46,7 @@ class Coupling_Constraint(Base_Constraint):
             return False
     
 class Constraint_coupling_zero(Coupling_Constraint):
-    def __call__(self, S, coupling_matrix, kappa_int_matrix):
+    def __call__(self, S, coupling_matrix, kappa_int_matrix, mode_tyes):
         idx1, idx2 = self.idxs
         element = coupling_matrix[idx1, idx2]
 
@@ -67,7 +67,7 @@ class Constraint_coupling_phase_zero(Coupling_Constraint):
             raise Exception('Constraint_coupling_phase_zero does only work if idx1 and idx2 are different')
         super().__init__(idx1, idx2)
 
-    def __call__(self, S, coupling_matrix, kappa_int_matrix):
+    def __call__(self, S, coupling_matrix, kappa_int_matrix, mode_tyes):
         idx1, idx2 = self.idxs
         element = coupling_matrix[idx1, idx2]
         return jnp.array([jnp.imag(element)])
@@ -77,6 +77,20 @@ class Constraint_coupling_phase_zero(Coupling_Constraint):
     
     def __hash__(self):
         return hash(('Constraint_coupling_zero', self.idxs[0], self.idxs[1]))
+    
+class Equal_Coupling_Rates(Base_Constraint):
+    def __init__(self, list_equal_couplings):
+        self.list_equal_couplings = list_equal_couplings
+    
+    def __call__(self, S, coupling_matrix, kappa_int_matrix, mode_tyes):
+        idx0_ref = self.list_equal_couplings[0][0]
+        idx1_ref = self.list_equal_couplings[0][1]
+        deviation = 0
+        for idx in range(1, len(self.list_equal_couplings)):
+            idx0, idx1 = self.list_equal_couplings[idx]
+            deviation += jnp.abs(jnp.abs(coupling_matrix[idx0,idx1]) - jnp.abs(coupling_matrix[idx0_ref,idx1_ref]))**2
+
+        return deviation
 
 def check_overlapping_constraints(list_of_constraints):
     for idx2 in range(len(list_of_constraints)):
@@ -227,19 +241,7 @@ def print_combo(combo):
     for el in combo:
         print(el)
 
-class Equal_Coupling_Rates(Base_Constraint):
-    def __init__(self, list_equal_couplings):
-        self.list_equal_couplings = list_equal_couplings
-    
-    def __call__(self, S, coupling_matrix, kappa_int_matrix):
-        idx0_ref = self.list_equal_couplings[0][0]
-        idx1_ref = self.list_equal_couplings[0][1]
-        deviation = 0
-        for idx in range(1, len(self.list_equal_couplings)):
-            idx0, idx1 = self.list_equal_couplings[idx]
-            deviation += jnp.abs(jnp.abs(coupling_matrix[idx0,idx1]) - jnp.abs(coupling_matrix[idx0_ref,idx1_ref]))**2
 
-        return deviation
     
 
     

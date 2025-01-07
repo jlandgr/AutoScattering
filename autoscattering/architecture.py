@@ -28,8 +28,13 @@ def find_min_number_of_pumps(triu_matrix):
         unique_labels = np.unique(labels)
         if np.max(unique_labels) >= len(unique_labels):
             return False
-        else:
-            return True
+
+        # returns False for combinations like [0,0,0,2,1] as they are identical with [0,0,0,1,2]
+        for idx in range(1, len(labels)):
+            if labels[idx] > np.max(labels[:idx])+1:
+                return False
+
+        return True
     
     upper_triu_adjacency_matrix = triu_to_upper_triu_adjacency_matrix(triu_matrix)
     num_modes = upper_triu_adjacency_matrix.shape[0]
@@ -43,6 +48,7 @@ def find_min_number_of_pumps(triu_matrix):
 
     labels_results = []
     for labels in product(*possible_labels):
+        labels = np.array(labels)
         if check_redundancy(labels):
             result = count_pumps(labels, upper_triu_adjacency_matrix=upper_triu_adjacency_matrix)
             if result is not None:
