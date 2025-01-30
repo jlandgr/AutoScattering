@@ -30,7 +30,6 @@ INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [1.e-8, 2.]
 # BOUNDS_ABS_DEFAULT = [-np.inf, np.inf]
 BOUNDS_INTRINSIC_LOSS_DEFAULT = [1.e-8, np.inf]
 
-
 def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix):
     num_modes = coupling_matrix.shape[0]
     identity = jnp.eye(num_modes)
@@ -192,6 +191,8 @@ class Architecture_Optimizer():
         self.valid_combinations = []
         self.invalid_combinations = []
         self.tested_complexities = []
+        self.num_tested_graphs = []
+        self.num_tested_invalid_graphs = []
         
         # make run without additional conditions
         if make_initial_test:
@@ -608,7 +609,7 @@ class Architecture_Optimizer():
 
         xsol = sciopt.minimize(lambda x: calc_conditions(x)[0], initial_guess, jac=calc_gradients, bounds=bounds, callback=callback, method=method, options=kwargs_solver)
 
-        success = np.all(np.abs(xsol['fun']) < self.kwargs_optimization['max_violation_success'])
+        success = np.all(np.abs(xsol['fun']) < max_violation_success)
         solution_complete_array = self.complete_variable_arrays_with_zeros(xsol.x, conditions)
         solution_effective_coupling_matrix = self.coupling_matrix_effective(solution_complete_array)
         kappa_int_matrix = self.kappa_int_matrix_jax(*solution_complete_array)
@@ -680,7 +681,8 @@ class Architecture_Optimizer():
 
             if success and interrupt_if_successful:
                 break
-        
+
+            
         return np.any(successes), infos, np.where(successes)
     
     def prepare_all_possible_combinations(self):
@@ -735,6 +737,7 @@ class Architecture_Optimizer():
             potential_combinations = combinations_to_test
 
         count_tested = 0
+        count_tested_invalid = 0
 
         for combo_idx in trange(len(potential_combinations)):
             combo = potential_combinations[combo_idx]
@@ -751,8 +754,11 @@ class Architecture_Optimizer():
                     newly_added_combos.append(valid_combo_to_add)
                 else:
                     self.invalid_combinations.append(combo)
+                    count_tested_invalid += 1
         
-        self.tested_complexities.append([complexity_level, count_tested])
+        self.tested_complexities.append(complexity_level)
+        self.num_tested_graphs.append(count_tested)
+        self.num_tested_invalid_graphs.append(count_tested_invalid)
     
     def identify_potential_combinations(self, complexity_level, skip_check_for_valid_subgraphs=False):
         all_idxs_with_desired_complexity = np.where(self.complexity_levels == complexity_level)[0]
@@ -778,6 +784,51 @@ class Architecture_Optimizer():
                     potential_combinations.append(coupling_matrix_combo)
 
         return potential_combinations
+    
+    def count_valid_invalid_graphs_individual_layer(self, complexity_level):
+
+        if complexity_level not in np.array(self.tested_complexities):
+            raise Exception('you have to run the optimisation first, requested complexity not found in self.tested_complexitites')
+
+        all_idxs_with_desired_complexity = np.where(self.complexity_levels == complexity_level)[0]
+        if len(all_idxs_with_desired_complexity) == 0:
+            raise Warning('no architecture with the requrested complexity_level exists')
+            return None
+        
+        num_valid_graphs = 0
+        num_invalid_graphs = 0
+
+        valid_combinations = np.asarray(self.valid_combinations)
+        # num_untested = 0
+        # num_total = len(all_idxs_with_desired_complexity)
+
+        for combo_idx in all_idxs_with_desired_complexity:
+            coupling_matrix_combo = self.list_of_upper_triangular_coupling_matrices[combo_idx]
+
+            # check if suggested graph is subgraph of an invalid graph
+            # cond1 = arch.check_if_subgraph_upper_triangle(np.asarray(self.invalid_combinations), coupling_matrix_combo)
+            # check if suggested graph has valid subgraphs
+            cond2 = arch.check_if_subgraph_upper_triangle(coupling_matrix_combo, valid_combinations)
+
+            # if cond1:
+            #     num_invalid_graphs += 1
+            if cond2:
+                num_valid_graphs += 1
+            else:
+                num_invalid_graphs += 1
+        
+        return num_valid_graphs, num_invalid_graphs
+    
+    def count_valid_invalid_graphs_layers(self):
+        self.valid_graphs_per_layer = []
+        self.invalid_graphs_per_layer = []
+        for c in self.unique_complexity_levels:
+            num_valid, num_invalid = self.count_valid_invalid_graphs_individual_layer(c)
+            self.valid_graphs_per_layer.append(num_valid)
+            self.invalid_graphs_per_layer.append(num_invalid)
+
+        return self.unique_complexity_levels, self.valid_graphs_per_layer, self.invalid_graphs_per_layer
+
     
     def cleanup_valid_combinations(self):
         all_unique_valid_combinations_array = np.unique(np.asarray(self.valid_combinations), axis=0)

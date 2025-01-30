@@ -92,6 +92,62 @@ class Equal_Coupling_Rates(Base_Constraint):
 
         return deviation
 
+class MinimalAddedInputNoise(Base_Constraint):
+    def __call__(self, scattering_matrix, coupling_matrix, kappa_int_matrix, mode_types):
+        '''
+        calculates the difference between the number of added input photons and the quantum limit
+
+        input arguments:
+        scattering matrix: full scattering matrix for the current parameter set, this also includes the scattering from and to the auxiliary modes
+        coupling matrix: dimensionless coupling matrix (sigma_z @ H in our equations) for the current parameter set, this constraint does not make any use of the coupling matrix
+        kappa_int_matrix: diagonal matrix with the dimensionless intrinsic loss rates on the diagonal
+        mode_types: whether a mode is part of subset M_1 or M_2 (True for M_1, False for M_2), see Appendix F for more details
+        '''
+
+        # calculate the linear response to fluctuations entering from the intrinsic loss channels (\mathcal{N} in the equations above)
+        noise_matrix = (scattering_matrix - jnp.eye(scattering_matrix.shape[0])) @ jnp.complex_(jnp.sqrt(kappa_int_matrix))
+
+        # calculate number of added photons at the input port, already considers that the target scattering matrix will be enforced
+        total_noise = 1/2 * (jnp.sum(jnp.abs(scattering_matrix[0,1:])**2) + jnp.sum(jnp.abs(noise_matrix[0,:])**2))
+        quantum_limit = 1/2
+        return total_noise - quantum_limit
+
+class MinimalAddedOutputNoise(Base_Constraint):
+    def __init__(self, Gval):
+        '''
+        Gval: target gain value
+        '''
+        self.Gval = Gval
+
+    def __call__(self, scattering_matrix, coupling_matrix, kappa_int_matrix, mode_types):
+        '''
+        calculates the difference between the number of added output photons and the quantum limit
+
+        input arguments:
+        scattering matrix: full scattering matrix for the current parameter set, this also includes the scattering from and to the auxiliary modes
+        coupling matrix: dimensionless coupling matrix (sigma_z @ H in our equations) for the current parameter set, this constraint does not make any use of the coupling matrix
+        kappa_int_matrix: diagonal matrix with the dimensionless intrinsic loss rates on the diagonal
+        mode_types: list of boolean values. These values determine whether a mode is part of subset M_1 or M_2 (True for M_1, False for M_2), see Appendix F for more details
+        '''
+
+        # calculate the linear response to fluctuations entering from the intrinsic loss channels (\mathcal{N} in the equations above)
+        noise_matrix = (scattering_matrix - jnp.eye(scattering_matrix.shape[0])) @ jnp.complex_(jnp.sqrt(kappa_int_matrix))
+
+        # calculate number of added photons at the output port, already considers that the target scattering matrix will be enforced
+        total_noise = 1/2 * (jnp.sum(jnp.abs(scattering_matrix[1,2:])**2) + jnp.sum(jnp.abs(noise_matrix[1,:])**2))
+
+        # input_output_part_of_same_set=True means that both modes are part of the same set M_1 or M_2
+        # This slightly influences the quantum limit for the output noise
+        input_output_part_of_same_set = mode_types[0]==mode_types[1]
+        if input_output_part_of_same_set:
+            quantum_limit = (self.Gval - 1)/2
+        else:
+            quantum_limit = (self.Gval + 1)/2
+
+        return total_noise - quantum_limit
+
+
+
 def check_overlapping_constraints(list_of_constraints):
     for idx2 in range(len(list_of_constraints)):
         for idx1 in range(idx2):
