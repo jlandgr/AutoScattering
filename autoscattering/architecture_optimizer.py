@@ -119,10 +119,9 @@ class Architecture_Optimizer():
             'init_intrinsinc_loss_range': INIT_INTRINSIC_LOSS_RANGE_DEFAULT,
             'bounds_intrinsic_loss': BOUNDS_INTRINSIC_LOSS_DEFAULT,
             'max_violation_success': 1.e-10,
+            'interrupt_if_successful': True
         }
-
         self.kwargs_optimization.update(kwargs_optimization)
-        self.kwargs_optimization['interrupt_if_successful'] = True
 
         if method is None:
             if self.kwargs_optimization['bounds_intrinsic_loss'] is None or port_intrinsic_losses is False:
@@ -358,17 +357,18 @@ class Architecture_Optimizer():
         
         # free Gauge phases
         if self.free_gauge_phases:
-            self.gauge_phases = [sp.Symbol('gauge%i'%idx, real=True) for idx in range(self.num_port_modes)]
-            self.gauge_factors = [sp.exp(sp.I*phase) for phase in self.gauge_phases]
+            self.gauge_phases_input = [sp.Symbol('gauge_in_%i'%idx, real=True) for idx in range(self.num_port_modes)]
+            self.gauge_phases_output = [sp.Symbol('gauge_out_%i'%idx, real=True) for idx in range(self.num_port_modes)]
+
             self.gauge_matrix = sp.zeros(self.num_port_modes)
             for idx1 in range(self.num_port_modes):
                 for idx2 in range(self.num_port_modes):
-                    self.gauge_matrix[idx1,idx2] = self.gauge_factors[idx1]*sp.conjugate(self.gauge_factors[idx2])
-            # S_target_used = sp.matrices.dense.matrix_multiply_elementwise(self.S_target, self.gauge_matrix)
+                    self.gauge_matrix[idx1,idx2] = sp.exp(sp.I * (self.gauge_phases_output[idx1] - self.gauge_phases_input[idx2]) )
+
         else:
-            self.gauge_phases = []
-            self.gauge_factors, self.gauge_factors, self.gauge_matrix = None, None, None
-            # S_target_used = self.S_target
+            self.gauge_phases_input = []
+            self.gauge_phases_output = []
+            self.gauge_matrix = None
         
         # internal losses
         self.variables_intrinsic_losses = []
@@ -387,13 +387,15 @@ class Architecture_Optimizer():
             self.Deltas + \
             self.gabs + \
             self.gphases + \
-            self.gauge_phases + \
+            self.gauge_phases_input + \
+            self.gauge_phases_output + \
             self.parameters_S_target + \
             self.variables_intrinsic_losses 
         self.all_variables_types = \
             [VAR_ABS]*len(self.Deltas+self.gabs) +\
             [VAR_PHASE]*len(self.gphases) + \
-            [VAR_PHASE]*len(self.gauge_phases) + \
+            [VAR_PHASE]*len(self.gauge_phases_input) + \
+            [VAR_PHASE]*len(self.gauge_phases_output) + \
             [VAR_USER_DEFINED]*len(self.parameters_S_target) + \
             [VAR_INTRINSIC_LOSS]*len(self.variables_intrinsic_losses) 
         self.S_target_free_symbols_init_range = S_target_free_symbols_init_range
