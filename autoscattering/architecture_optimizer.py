@@ -30,6 +30,11 @@ INIT_INTRINSIC_LOSS_RANGE_DEFAULT = [1.e-8, 2.]
 # BOUNDS_ABS_DEFAULT = [-np.inf, np.inf]
 BOUNDS_INTRINSIC_LOSS_DEFAULT = [1.e-8, np.inf]
 
+GAUGE_AND_DETECTOR_POSITION = 'gauge+detector position variable'
+ONLY_GAUGE = 'only gauge phase variable'
+ONLY_DETECTOR_POSITION = 'only detector position variable'
+NO_GAUGE_FREEDOM = 'neither gauge phase or detector position variable'
+
 def calc_scattering_matrix_from_coupling_matrix(coupling_matrix, kappa_int_matrix):
     num_modes = coupling_matrix.shape[0]
     identity = jnp.eye(num_modes)
@@ -107,7 +112,7 @@ class Architecture_Optimizer():
             S_target_free_symbols_init_range=None,
             make_initial_test=True,
             phase_constraints_for_squeezing=False,
-            free_gauge_phases=True,
+            gauge_freedom=ONLY_DETECTOR_POSITION,
             port_intrinsic_losses=False,
             method=None,
             enforced_constraints=[]):
@@ -149,7 +154,7 @@ class Architecture_Optimizer():
         self.mode_loss_info = [LOSSY_MODE]*self.num_lossy_modes + [ZERO_LOSS_MODE]*self.num_zero_loss_modes
 
         self.signs_zero_loss_detunings = signs_zero_loss_detunings
-        self.free_gauge_phases = free_gauge_phases
+        self.gauge_freedom = gauge_freedom
 
         if port_intrinsic_losses is True:
             self.port_intrinsic_losses = np.array([True for _ in range(self.num_port_modes)])
@@ -356,19 +361,37 @@ class Architecture_Optimizer():
                 raise Exception('variable '+var.name+' is complex, only real variables are allowed')
         
         # free Gauge phases
-        if self.free_gauge_phases:
-            self.gauge_phases_input = [sp.Symbol('gauge_in_%i'%idx, real=True) for idx in range(self.num_port_modes)]
-            self.gauge_phases_output = [sp.Symbol('gauge_out_%i'%idx, real=True) for idx in range(self.num_port_modes)]
+        self.gauge_phases_input = [sp.Symbol('gamma^in_%i'%idx, real=True) for idx in range(self.num_port_modes)]
+        self.gauge_phases_output = [sp.Symbol('gamma^out_%i'%idx, real=True) for idx in range(self.num_port_modes)]
+        self.gauge_matrix = sp.zeros(self.num_port_modes)
+        for idx1 in range(self.num_port_modes):
+            for idx2 in range(self.num_port_modes):
+                self.gauge_matrix[idx1,idx2] = sp.exp(sp.I * (self.gauge_phases_output[idx1] - self.gauge_phases_input[idx2]) )
 
-            self.gauge_matrix = sp.zeros(self.num_port_modes)
-            for idx1 in range(self.num_port_modes):
-                for idx2 in range(self.num_port_modes):
-                    self.gauge_matrix[idx1,idx2] = sp.exp(sp.I * (self.gauge_phases_output[idx1] - self.gauge_phases_input[idx2]) )
-
+        if self.gauge_freedom == GAUGE_AND_DETECTOR_POSITION:
+            # both detector position and gauge phases are free variables 
+            # this means that in and out phase are independent of each other and are both left for optimization
+            self.free_gauge_phases = self.gauge_phases_input + self.gauge_phases_output
+        elif self.gauge_freedom == ONLY_DETECTOR_POSITION:
+            # only detector position is variable, the gauge phases remain fixed
+            # moving the detector in one direction increases the phase of the in field, while decreasing the out field's phase by the same amount
+            # this means that in and out phases are the negative of each other not independent
+            subs_dict = {self.gauge_phases_input[idx]: -self.gauge_phases_output[idx] for idx in range(self.num_port_modes)}
+            self.gauge_matrix = self.gauge_matrix.subs(subs_dict)
+            self.free_gauge_phases = self.gauge_phases_output
+        elif self.gauge_freedom == ONLY_GAUGE:
+            # only gauge phase is variable, the detector position is fixed
+            # this means that in and out phases are the same
+            subs_dict = {self.gauge_phases_input[idx]: self.gauge_phases_output[idx] for idx in range(self.num_port_modes)}
+            self.gauge_matrix = self.gauge_matrix.subs(subs_dict)
+            self.free_gauge_phases = self.gauge_phases_output
+        elif self.gauge_freedom == NO_GAUGE_FREEDOM:
+            # gauge phases and detector positions are fixed, no free variables
+            self.free_gauge_phases = []
+            self.gauge_matrix = sp.ones(self.num_port_modes)
         else:
-            self.gauge_phases_input = []
-            self.gauge_phases_output = []
-            self.gauge_matrix = None
+            raise NotImplementedError('You have to use one of the the predefined options for the Gauge freedom, this includes GAUGE_AND_DETECTOR_POSITION, ONLY_DETECTOR_POSITION, ONLY_GAUGE, and NO_GAUGE_FREEDOM')
+            
         
         # internal losses
         self.variables_intrinsic_losses = []
@@ -387,15 +410,13 @@ class Architecture_Optimizer():
             self.Deltas + \
             self.gabs + \
             self.gphases + \
-            self.gauge_phases_input + \
-            self.gauge_phases_output + \
+            self.free_gauge_phases + \
             self.parameters_S_target + \
             self.variables_intrinsic_losses 
         self.all_variables_types = \
             [VAR_ABS]*len(self.Deltas+self.gabs) +\
             [VAR_PHASE]*len(self.gphases) + \
-            [VAR_PHASE]*len(self.gauge_phases_input) + \
-            [VAR_PHASE]*len(self.gauge_phases_output) + \
+            [VAR_PHASE]*len(self.free_gauge_phases) + \
             [VAR_USER_DEFINED]*len(self.parameters_S_target) + \
             [VAR_INTRINSIC_LOSS]*len(self.variables_intrinsic_losses) 
         self.S_target_free_symbols_init_range = S_target_free_symbols_init_range
@@ -403,10 +424,7 @@ class Architecture_Optimizer():
         self.S_target_jax = sp.utilities.lambdify(self.all_variables_list, self.S_target, modules='jax') 
         self.coupling_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.coupling_matrix, modules='jax') 
         self.kappa_int_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.kappa_int_matrix, modules='jax') 
-        if self.free_gauge_phases:
-            self.gauge_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.gauge_matrix, modules='jax') 
-        else:
-            self.gauge_matrix_jax = None
+        self.gauge_matrix_jax = sp.utilities.lambdify(self.all_variables_list, self.gauge_matrix, modules='jax') 
     
     def create_initial_guess(self, conditions=[], init_abs_range=None, phase_range=None, init_intrinsinc_loss_range=None):
         if init_abs_range is None:
@@ -472,7 +490,7 @@ class Architecture_Optimizer():
         
         self.coupling_matrix_effective = coupling_matrix_effective
 
-        if self.free_gauge_phases:
+        if self.gauge_freedom:
             def calc_target_scattering_matrix(input_array):
                 return jnp.multiply(self.S_target_jax(*input_array), self.gauge_matrix_jax(*input_array))
         else:
@@ -617,7 +635,7 @@ class Architecture_Optimizer():
         kappa_int_matrix = self.kappa_int_matrix_jax(*solution_complete_array)
 
         scattering_matrix_target_func = self.S_target_jax(*solution_complete_array)
-        if self.free_gauge_phases:
+        if self.gauge_freedom:
             gauge_matrix = self.gauge_matrix_jax(*solution_complete_array)
             scattering_matrix_target_times_gauge_matrix = scattering_matrix_target_func*gauge_matrix
         else:
