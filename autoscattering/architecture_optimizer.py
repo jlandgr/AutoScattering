@@ -22,7 +22,7 @@ VAR_PHASE = 'phase_variable'
 VAR_INTRINSIC_LOSS = 'intrinsic_loss_variable'
 VAR_USER_DEFINED = 'user_defined'
 
-ZERO_LOSS_MODE = 'zero_loss_mode'
+FAR_DETUNED_MODES = 'far_detuned_mode'
 LOSSY_MODE = 'lossy_mode'
 
 INIT_ABS_RANGE_DEFAULT = [-1., 1.]
@@ -104,9 +104,9 @@ def find_minimum_number_auxiliary_modes(start_value=0, max_value=5, allow_squeez
 class Architecture_Optimizer():
     def __init__(
             self,
-            S_target, num_auxiliary_modes, num_zero_loss_modes=0, mode_types='no_squeezing',
+            S_target, num_auxiliary_modes, num_far_detuned_modes=0, mode_types='no_squeezing',
             gradient_method=AUTODIFF_REVERSE,
-            signs_zero_loss_detunings=None,
+            detuning_signs_far_detuned_modes=None,
             kwargs_optimization={},
             solver_options={},
             S_target_free_symbols_init_range=None,
@@ -149,11 +149,11 @@ class Architecture_Optimizer():
         self.num_port_modes = S_target.shape[0]
         self.num_lossy_internal_modes = num_auxiliary_modes
         self.num_lossy_modes = self.num_port_modes + num_auxiliary_modes
-        self.num_zero_loss_modes = num_zero_loss_modes
-        self.num_modes = self.num_port_modes + self.num_lossy_internal_modes + self.num_zero_loss_modes
-        self.mode_loss_info = [LOSSY_MODE]*self.num_lossy_modes + [ZERO_LOSS_MODE]*self.num_zero_loss_modes
+        self.num_far_detuned_modes = num_far_detuned_modes
+        self.num_modes = self.num_port_modes + self.num_lossy_internal_modes + self.num_far_detuned_modes
+        self.mode_loss_info = [LOSSY_MODE]*self.num_lossy_modes + [FAR_DETUNED_MODES]*self.num_far_detuned_modes
 
-        self.signs_zero_loss_detunings = signs_zero_loss_detunings
+        self.detuning_signs_far_detuned_modes = detuning_signs_far_detuned_modes
         self.gauge_freedom = gauge_freedom
 
         if port_intrinsic_losses is True:
@@ -167,7 +167,7 @@ class Architecture_Optimizer():
         self.phase_constraints_for_squeezing = phase_constraints_for_squeezing
         self.enforced_constraints = enforced_constraints
 
-        # add to enforced constraints, that no coupling is allowed between zero-loss modes
+        # add to enforced constraints, that no coupling is allowed between far detuned modes
         for idx2 in range(self.num_lossy_modes, self.num_modes):
             for idx1 in range(self.num_lossy_modes, idx2+1):
                 constraint = msc.Coupling_Constraint(idx1, idx2)
@@ -334,11 +334,11 @@ class Architecture_Optimizer():
                 if not msc.Constraint_coupling_zero(idx, idx) in self.enforced_constraints:
                     coupling_matrix_dimensionless[idx, idx] = self.__give_coupling_element__(idx, idx, operators=self.operators, append=append)
             else:
-                coupling_matrix_dimensionless[idx,idx] = self.signs_zero_loss_detunings[idx-self.num_lossy_modes]
+                coupling_matrix_dimensionless[idx,idx] = self.detuning_signs_far_detuned_modes[idx-self.num_lossy_modes]
         
         for idx1 in range(self.num_modes):
             for idx2 in range(self.num_modes):
-                if self.mode_loss_info[idx1] != ZERO_LOSS_MODE or self.mode_loss_info[idx2] != ZERO_LOSS_MODE: # current version of the code does not cover cases, where zero-loss modes are coupled with each other
+                if self.mode_loss_info[idx1] != FAR_DETUNED_MODES or self.mode_loss_info[idx2] != FAR_DETUNED_MODES: # current version of the code does not cover cases, where far-detuned modes are coupled with each other
                     if idx1 != idx2: # diagional elements corresponds to detunings, they were already initialised in the previous for loop
                         if not msc.Constraint_coupling_zero(idx1, idx2) in self.enforced_constraints:
                             if not msc.Constraint_coupling_phase_zero(idx1, idx2) in self.enforced_constraints:
@@ -474,14 +474,14 @@ class Architecture_Optimizer():
             if not isinstance(c, msc.Coupling_Constraint):
                 self.enforced_constraints_beyond_coupling_constraint.append(c)
 
-        if self.num_zero_loss_modes > 0:
+        if self.num_far_detuned_modes > 0:
             def coupling_matrix_effective(input_array):
                 # calculate effective coupling matrix between the lossy modes, see Supplemental Material in paper
                 coupling_matrix = self.coupling_matrix_jax(*input_array) # full coupling matrix
                 coupling_matrix_lossy_modes = coupling_matrix[:self.num_lossy_modes,:self.num_lossy_modes] # coupling matrix between all lossy modes (port and auxiliary modes)
-                coupling_matrix_lossy_not_lossy = coupling_matrix[:self.num_lossy_modes,self.num_lossy_modes:] # coupling between zero-loss modes and lossy modes
+                coupling_matrix_lossy_not_lossy = coupling_matrix[:self.num_lossy_modes,self.num_lossy_modes:] # coupling between far-detuned modes and lossy modes
                 coupling_matrix_not_lossy_lossy = coupling_matrix[self.num_lossy_modes:,:self.num_lossy_modes] # the other way round
-                coupling_matrix_not_lossy = coupling_matrix[self.num_lossy_modes:,self.num_lossy_modes:] # coupling between zero-loss modes (only considering detunings, which are set to +/- 1 for rescaling)
+                coupling_matrix_not_lossy = coupling_matrix[self.num_lossy_modes:,self.num_lossy_modes:] # coupling between far-detuned modes (only considering detunings, which are set to +/- 1 for rescaling)
 
                 return coupling_matrix_lossy_modes - coupling_matrix_lossy_not_lossy @ jnp.linalg.inv(coupling_matrix_not_lossy) @ coupling_matrix_not_lossy_lossy
         else:
@@ -711,14 +711,14 @@ class Architecture_Optimizer():
         self.possible_matrix_entries = []
         for idx1, idx2 in np.array(idxs_upper_triangle).T:
             if idx1 == idx2:
-                if self.mode_loss_info[idx1] == ZERO_LOSS_MODE:
+                if self.mode_loss_info[idx1] == FAR_DETUNED_MODES:
                     allowed_entries = [arch.DETUNING]
                 elif msc.Constraint_coupling_zero(idx1,idx1) in self.enforced_constraints:
                     allowed_entries = [arch.NO_COUPLING]
                 else:
                     allowed_entries = [arch.NO_COUPLING, arch.DETUNING]
             else:
-                if self.mode_loss_info[idx1] == ZERO_LOSS_MODE and self.mode_loss_info[idx2] == ZERO_LOSS_MODE:
+                if self.mode_loss_info[idx1] == FAR_DETUNED_MODES and self.mode_loss_info[idx2] == FAR_DETUNED_MODES:
                     allowed_entries = [arch.NO_COUPLING]
                 else:
                     allowed_entries = [arch.NO_COUPLING, arch.COUPLING_WITHOUT_PHASE, arch.COUPLING_WITH_PHASE]
