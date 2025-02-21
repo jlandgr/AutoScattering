@@ -9,10 +9,10 @@ from setuptools import setup, find_packages
 author = 'Jonas Landgraf'
 email = 'Jonas.Landgraf@mpl.mpg.de Vittorio.Peano@mpl.mpg.de Florian.Marquardt@mpl.mpg.de'
 description = 'Automatic design of coupled mode setups'
-dist_name = 'autoscattering'
-package_name = 'autoscattering'
+dist_name = 'autoscatter'
+package_name = 'autoscatter'
 year = '2024'
-url = 'https://github.com/jlandgr/autoscattering'
+url = 'https://github.com/jlandgr/autoscatter'
 
 
 def get_version():
