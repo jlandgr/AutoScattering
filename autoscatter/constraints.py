@@ -190,7 +190,7 @@ def return_edge_type(combos, mode_types, idx1, idx2):
         return EDGETYPESQUEEZING
 
 def plot_graph(combination=None, triu_matrix=None, node_colors=None, mode_types='no_squeezing', color_detuning='black', color_passive='black', color_active='green', color_squeezing='blue', positions=None, ax=None, edge_width=2):
-    from autoscattering.architecture import translate_upper_triangle_coupling_matrix_to_conditions
+    from autoscatter.architecture import translate_upper_triangle_coupling_matrix_to_conditions
     if combination is None:
         combination = translate_upper_triangle_coupling_matrix_to_conditions(triu_matrix)
     num_modes = len(node_colors)

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import tqdm
 from itertools import product
 
-from autoscattering.constraints import Constraint_coupling_zero, Constraint_coupling_phase_zero
+from autoscatter.constraints import Constraint_coupling_zero, Constraint_coupling_phase_zero
 
 # def matrix1_subgraph_to_matrix2(matrix1, matrix2):
 #     return jnp.sum((matrix2 - matrix1) < 0) == 0
